@@ -70,8 +70,18 @@ export interface Scene {
   furniture: Furniture[]
 }
 
+export type LayerRole = 'wall' | 'door' | 'window' | 'furniture' | 'text' | 'other' | 'ignore'
+
+export interface CadLayer {
+  name: string
+  count: number
+  role: LayerRole
+}
+
 export interface RecognizeResponse {
   scene: Scene
   overlay: string
   log: string[]
+  /** AutoCAD 檔才有:各圖層與判定的角色 */
+  cad: { layers: CadLayer[] } | null
 }

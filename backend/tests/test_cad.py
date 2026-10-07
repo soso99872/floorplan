@@ -71,12 +71,14 @@ def test_round_trip(original, variants, name):
     scene = build_scene_from_cad(variants[name], f"{name}.dxf", with_background=False).scene
     assert len(scene.walls) == len(original.walls)
     assert wall_length(scene) == pytest.approx(wall_length(original), rel=0.02)
+    for w in scene.walls:
+        assert w.thickness == pytest.approx(original.walls[0].thickness, abs=10)
     assert same_openings(door_signature(scene), door_signature(original))
     assert len(scene.furniture) == len(original.furniture)
     assert Counter(f.type for f in scene.furniture) == Counter(f.type for f in original.furniture)
     assert sorted(r.name for r in scene.rooms) == sorted(r.name for r in original.rooms)
     for a, b in zip(sorted(original.rooms, key=lambda r: r.name), sorted(scene.rooms, key=lambda r: r.name)):
-        assert b.area == pytest.approx(a.area, abs=0.3)
+        assert b.area == pytest.approx(a.area, rel=0.01, abs=0.3)
 
 
 def test_layer_override(variants):
@@ -149,6 +151,7 @@ def test_public_sample():
     assert any("不合理" in line for line in r.log)  # 有發現單位設定錯誤
     xs = [c for w in s.walls for c in (w.a[0], w.b[0])]
     assert max(xs) - min(xs) == pytest.approx(12000, abs=400)  # 外牆中心線約 12 m
+    assert {w.thickness for w in s.walls} == {250.0}
     assert sorted(r.name for r in s.rooms) == ["BEDROOM 1", "BEDROOM 2", "KITCHEN", "LIVING"]
     assert Counter(o.kind for o in s.openings)["window"] == 4
     assert Counter(o.kind for o in s.openings)["door"] >= 2

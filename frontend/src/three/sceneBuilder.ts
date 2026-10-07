@@ -53,7 +53,7 @@ function extrudeMulti(mp: MultiPolygon, z0: number, z1: number): THREE.BufferGeo
     for (const hole of poly.slice(1)) shape.holes.push(new THREE.Path(ring(hole)))
     const g = new THREE.ExtrudeGeometry(shape, { depth: z1 - z0, bevelEnabled: false })
     g.translate(0, 0, z0)
-    out.push(g.toNonIndexed())
+    out.push(g.index ? g.toNonIndexed() : g)
   }
   return out
 }

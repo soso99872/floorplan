@@ -370,7 +370,7 @@ def build_scene_from_cad(data: bytes, filename: str, wall_height=3000, layer_rol
     R = Raster(x0 - MARGIN_MM, y0 - MARGIN_MM, x1 + MARGIN_MM, y1 + MARGIN_MM, mpp)
 
     lines_img, solid_img = R.blank(), R.blank()
-    R.draw(lines_img, wall_lines, 255, 2)
+    R.draw(lines_img, wall_lines, 255, 1)
     R.fill(solid_img, wall_solids, 255)
     raw = wall_mask_from_lines(lines_img, solid_img, mpp)
     if not raw.any():
@@ -383,6 +383,8 @@ def build_scene_from_cad(data: bytes, filename: str, wall_height=3000, layer_rol
 
     openings = find_cad_openings(clean, t, mpp, R, by_role, scale, tol, S, log)
     walls_px, scene_walls, to_mm = make_walls(clean, t, mpp, openings, wall_height, log)
+    for w in scene_walls:
+        w.thickness = cad_thickness(w.thickness, mpp)
     scene_openings, wall_dist = make_openings(openings, walls_px, scene_walls, clean, mpp, log)
 
     labels, room_ids = rz.segment_rooms(clean, openings, t, mpp)
@@ -424,11 +426,17 @@ def build_scene_from_cad(data: bytes, filename: str, wall_height=3000, layer_rol
     if with_background:
         background = Background(src=data_url(im), width=R.w * mpp, height=R.h * mpp)
     scene = Scene(
-        meta=Meta(mm_per_px=mpp, wall_height=wall_height, wall_thickness=round(t * mpp, 1), background=background),
+        meta=Meta(mm_per_px=mpp, wall_height=wall_height, wall_thickness=cad_thickness(t * mpp, mpp),
+                  background=background),
         walls=scene_walls, openings=scene_openings, rooms=scene_rooms,
         furniture=[f for f, _ in scene_furniture],
     )
     return Recognition(scene, overlay(im, clean, openings, []), log, cad={"layers": layers})
+
+
+def cad_thickness(mm, mpp):
+    """點陣化時牆線本身多佔了約一個像素,扣掉;CAD 的牆厚通常是 5 mm 的倍數。"""
+    return float(max(20, round((mm - mpp) / 5) * 5))
 
 
 def floor_color_for(name):
