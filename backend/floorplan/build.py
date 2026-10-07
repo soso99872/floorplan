@@ -43,10 +43,11 @@ ROOM_NAMES = [
 class Recognition:
     """辨識結果:Scene 加上給使用者看的偵錯資訊。"""
 
-    def __init__(self, scene, overlay_png, log):
+    def __init__(self, scene, overlay_png, log, cad=None):
         self.scene = scene
         self.overlay_png = overlay_png
         self.log = log
+        self.cad = cad  # CAD 匯入時的圖層資訊 {"layers": [{name, count, role}]}
 
 
 def data_url(img):
@@ -125,6 +126,113 @@ def room_name(types, used):
     return f"房間 {n}"
 
 
+class Frame:
+    """像素 → 模型 mm 的換算(模型 y 向上,原點在圖的左下角)。"""
+
+    def __init__(self, mm_per_px, img_h):
+        self.mm_per_px = mm_per_px
+        self.img_h = img_h
+
+    def __call__(self, p):
+        return (round(float(p[0]) * self.mm_per_px, 1), round(float(self.img_h - p[1]) * self.mm_per_px, 1))
+
+
+def make_walls(clean, t, mm_per_px, openings, wall_height, log):
+    """開口填回牆裡再規整一次:牆段會連續穿過門窗。回傳 (像素牆段, Scene 牆段, 換算)。"""
+    filled = clean.copy()
+    for o in openings:
+        x, y, w, h = o["rect"]
+        filled[y:y + h, x:x + w] = 255
+    rects, leftovers, _ = rz.regularize_walls(filled, t)
+    walls_px = [rect_to_segment(*r) for r in rects] + [poly_to_segment(p) for p in leftovers]
+    to_mm = Frame(mm_per_px, clean.shape[0])
+    scene_walls = [
+        Wall(id=f"w{i + 1}", a=to_mm(a), b=to_mm(b), thickness=round(th * mm_per_px, 1), height=wall_height)
+        for i, (a, b, th) in enumerate(walls_px)
+    ]
+    log.append(f"[牆] {len(scene_walls)} 段")
+    return walls_px, scene_walls, to_mm
+
+
+def door_from_arc(o, wall):
+    """CAD 門弧的方向 → Scene 的 swing / hinge(以牆段 a→b 為準)。"""
+    a, b = np.array(wall[0], float), np.array(wall[1], float)
+    u = (b - a) / np.linalg.norm(b - a)
+    left = np.array([-u[1], u[0]])
+    # 圖片座標的左手邊在 y 向上的模型座標是右手邊,所以反號
+    res = {"swing": -1 if left @ np.array(o["out_px"]) > 0 else 1}
+    if "hinge_px" in o:
+        x, y, w, h = o["rect"]
+        center = (np.array([x + w / 2, y + h / 2]) - a) @ u
+        res["hinge"] = "start" if (np.array(o["hinge_px"]) - a) @ u < center else "end"
+    return res
+
+
+def make_openings(openings, walls_px, scene_walls, clean, mm_per_px, log):
+    """開口(像素矩形)掛到牆段上。
+
+    開口可以帶 CAD 讀到的確定值蓋過推測:leaves、width_mm,
+    以及門弧推出的 out_px(門片打開時朝向的方向,像素座標)與 hinge_px(鉸鏈位置)。"""
+    wall_dist = cv2.distanceTransform(cv2.bitwise_not(clean), cv2.DIST_L2, 5)
+    result = []
+    for o in openings:
+        hit = attach_opening(o, walls_px)
+        if hit is None:
+            log.append(f"[警告] 有一個開口找不到所在的牆,略過(位置 {o['rect'][:2]})")
+            continue
+        i, _, along = hit
+        x, y, w, h = o["rect"]
+        width = o.get("width_mm") or max(w, h) * mm_per_px
+        if "out_px" in o:
+            o = dict(o, **door_from_arc(o, walls_px[i][:2]))
+        kind = o["kind"]
+        if kind == "door" and width > PASSAGE_WIDTH and "leaves" not in o:
+            kind = "passage"
+        if kind == "door":
+            # 圖片座標的左手邊,換到 y 向上的模型座標會變成右手邊,所以要反號
+            swing = o.get("swing") or -swing_side(o, walls_px[i][:2], wall_dist, clean.shape)
+            leaves = o.get("leaves") or (2 if width > DOUBLE_DOOR_WIDTH else 1)
+        else:
+            swing, leaves = 1, 0
+        result.append(Opening(
+            id=f"o{len(result) + 1}",
+            wall=scene_walls[i].id,
+            kind=kind,
+            offset=round(along * mm_per_px, 1),
+            width=round(width, 1),
+            sill=rz.WINDOW_SILL if kind == "window" else 0,
+            head=rz.DOOR_HEAD,
+            leaves=leaves,
+            swing=swing,
+            hinge=o.get("hinge", "start"),
+            exterior=bool(o["outer"]),
+        ))
+    n_kind = {k: sum(o.kind == k for o in result) for k in ("window", "door", "passage")}
+    log.append(f"[開口] 窗 {n_kind['window']}、門 {n_kind['door']}、通道 {n_kind['passage']}")
+    return result, wall_dist
+
+
+def make_rooms(labels, room_ids, to_mm, name_of, color_of, log):
+    """房間 label 圖 → 房間多邊形。name_of(r, polygon_mm)、color_of(r) 由呼叫端決定。"""
+    rooms = []
+    for r in room_ids:
+        m = (labels == r).astype(np.uint8)
+        cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cnt = cv2.approxPolyDP(max(cnts, key=cv2.contourArea), 2.0, True)[:, 0, :]
+        if len(cnt) < 3:
+            continue
+        poly = [to_mm(p) for p in cnt]
+        rooms.append(Room(
+            id=f"r{len(rooms) + 1}",
+            name=name_of(r, poly),
+            polygon=poly,
+            area=round(Polygon(poly).area / 1e6, 2),
+            floor_color=color_of(r),
+        ))
+    log.append(f"[房間] {len(rooms)} 間:" + "、".join(f"{r.name} {r.area:g} m²" for r in rooms))
+    return rooms
+
+
 def build_scene(src, width_mm=DEFAULT_WIDTH_MM, wall_height=DEFAULT_WALL_HEIGHT, with_background=True):
     """width_mm = 外牆總寬(圖上最左到最右外牆外緣的實際長度);給 None 時用牆厚估比例尺。"""
     cv2.setRNGSeed(0)  # 家具分色用 k-means,固定亂數種子,同一張圖每次結果才一樣
@@ -146,52 +254,8 @@ def build_scene(src, width_mm=DEFAULT_WIDTH_MM, wall_height=DEFAULT_WALL_HEIGHT,
 
     value = cv2.cvtColor(im, cv2.COLOR_BGR2HSV)[..., 2]
     openings = rz.classify(rz.find_openings(clean, t, 1 / mm_per_px), wall_box, t, value)
-
-    # 開口填回牆裡再規整一次:牆段會連續穿過門窗
-    filled = clean.copy()
-    for o in openings:
-        x, y, w, h = o["rect"]
-        filled[y:y + h, x:x + w] = 255
-    rects2, leftovers2, _ = rz.regularize_walls(filled, t)
-    walls_px = [rect_to_segment(*r) for r in rects2] + [poly_to_segment(p) for p in leftovers2]
-
-    img_h = im.shape[0]
-    to_mm = lambda p: (round(float(p[0]) * mm_per_px, 1), round(float(img_h - p[1]) * mm_per_px, 1))
-
-    scene_walls = [
-        Wall(id=f"w{i + 1}", a=to_mm(a), b=to_mm(b), thickness=round(th * mm_per_px, 1), height=wall_height)
-        for i, (a, b, th) in enumerate(walls_px)
-    ]
-    log.append(f"[牆] {len(scene_walls)} 段")
-
-    wall_dist = cv2.distanceTransform(cv2.bitwise_not(clean), cv2.DIST_L2, 5)
-    scene_openings = []
-    for o in openings:
-        hit = attach_opening(o, walls_px)
-        if hit is None:
-            log.append(f"[警告] 有一個開口找不到所在的牆,略過(位置 {o['rect'][:2]})")
-            continue
-        i, _, along = hit
-        x, y, w, h = o["rect"]
-        width = max(w, h) * mm_per_px
-        kind = o["kind"]
-        if kind == "door" and width > PASSAGE_WIDTH:
-            kind = "passage"
-        scene_openings.append(Opening(
-            id=f"o{len(scene_openings) + 1}",
-            wall=scene_walls[i].id,
-            kind=kind,
-            offset=round(along * mm_per_px, 1),
-            width=round(width, 1),
-            sill=rz.WINDOW_SILL if kind == "window" else 0,
-            head=rz.DOOR_HEAD,
-            leaves=0 if kind != "door" else (2 if width > DOUBLE_DOOR_WIDTH else 1),
-            # 圖片座標的左手邊,換到 y 向上的模型座標會變成右手邊,所以要反號
-            swing=-swing_side(o, walls_px[i][:2], wall_dist, clean.shape) if kind == "door" else 1,
-            exterior=bool(o["outer"]),
-        ))
-    n_kind = {k: sum(o.kind == k for o in scene_openings) for k in ("window", "door", "passage")}
-    log.append(f"[開口] 窗 {n_kind['window']}、門 {n_kind['door']}、通道 {n_kind['passage']}")
+    walls_px, scene_walls, to_mm = make_walls(clean, t, mm_per_px, openings, wall_height, log)
+    scene_openings, wall_dist = make_openings(openings, walls_px, scene_walls, clean, mm_per_px, log)
 
     lab = rz.image_lab(im)
     labels, room_ids = rz.segment_rooms(clean, openings, t, mm_per_px)
@@ -203,29 +267,21 @@ def build_scene(src, width_mm=DEFAULT_WIDTH_MM, wall_height=DEFAULT_WALL_HEIGHT,
         scene_furniture.append(Furniture(id=f"f{len(scene_furniture) + 1}", **pl))
     log.append(f"[家具] {len(scene_furniture)} 件")
 
-    scene_rooms, used = [], {}
-    for r in room_ids:
-        m = (labels == r).astype(np.uint8)
-        cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cnt = cv2.approxPolyDP(max(cnts, key=cv2.contourArea), 2.0, True)[:, 0, :]
-        if len(cnt) < 3:
-            continue
-        poly = [to_mm(p) for p in cnt]
+    used = {}
+
+    def name_of(r, _poly):
+        return room_name({f["type"] for f in items if f["room"] == r}, used)
+
+    def color_of(r):
         floor = rz.floor_color(lab[labels == r])
-        floor_bgr = cv2.cvtColor(np.uint8([[[floor[0] * 255 / 100, floor[1] + 128, floor[2] + 128]]]), cv2.COLOR_LAB2BGR)[0, 0]
-        types = {f["type"] for f in items if f["room"] == r}
-        scene_rooms.append(Room(
-            id=f"r{len(scene_rooms) + 1}",
-            name=room_name(types, used),
-            polygon=poly,
-            area=round(Polygon(poly).area / 1e6, 2),
-            floor_color="#%02x%02x%02x" % tuple(int(c) for c in floor_bgr[::-1]),
-        ))
-    log.append(f"[房間] {len(scene_rooms)} 間:" + "、".join(f"{r.name} {r.area:g} m²" for r in scene_rooms))
+        bgr = cv2.cvtColor(np.uint8([[[floor[0] * 255 / 100, floor[1] + 128, floor[2] + 128]]]), cv2.COLOR_LAB2BGR)[0, 0]
+        return "#%02x%02x%02x" % tuple(int(c) for c in bgr[::-1])
+
+    scene_rooms = make_rooms(labels, room_ids, to_mm, name_of, color_of, log)
 
     background = None
     if with_background:
-        background = Background(src=data_url(im), width=im.shape[1] * mm_per_px, height=img_h * mm_per_px)
+        background = Background(src=data_url(im), width=im.shape[1] * mm_per_px, height=im.shape[0] * mm_per_px)
     scene = Scene(
         meta=Meta(mm_per_px=mm_per_px, wall_height=wall_height, wall_thickness=round(t * mm_per_px, 1),
                   background=background),
