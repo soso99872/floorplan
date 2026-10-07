@@ -20,6 +20,7 @@ import cv2
 import numpy as np
 from shapely.geometry import Polygon
 
+from . import ml
 from . import recognize as rz
 from .scene import Background, Furniture, Meta, Opening, Room, Scene, Wall
 
@@ -233,12 +234,77 @@ def make_rooms(labels, room_ids, to_mm, name_of, color_of, log):
     return rooms
 
 
-def build_scene(src, width_mm=DEFAULT_WIDTH_MM, wall_height=DEFAULT_WALL_HEIGHT, with_background=True):
-    """width_mm = 外牆總寬(圖上最左到最右外牆外緣的實際長度);給 None 時用牆厚估比例尺。"""
+ENGINES = ("auto", "ml", "rules")
+
+
+def outer_of(rect, wall_box, t):
+    """開口是否在外牆上(跟 recognize.classify 同一個判斷)。"""
+    x, y, w, h = rect
+    x0, y0, x1, y1 = wall_box
+    if w >= h:
+        return y - y0 < 2 * t or y1 - (y + h) < 2 * t
+    return x - x0 < 2 * t or x1 - (x + w) < 2 * t
+
+
+def ml_walls(im):
+    """模型的分割結果(縮放回原圖大小)→ 牆遮罩、牆厚、分割圖。"""
+    seg, scale = ml.segment(im)
+    if scale != 1:
+        seg = cv2.resize(seg, (im.shape[1], im.shape[0]), interpolation=cv2.INTER_NEAREST)
+    raw = (seg == ml.WALL).astype(np.uint8) * 255
+    n, lab, st, _ = cv2.connectedComponentsWithStats(raw)
+    if n <= 1:
+        raise rz.PlanError("找不到牆(機器學習)")
+    t = rz.wall_thickness(raw)
+    keep = np.zeros_like(raw)  # 去掉零星的小誤判
+    for i in range(1, n):
+        if max(st[i, 2], st[i, 3]) >= 4 * t:
+            keep[lab == i] = 255
+    return keep, t, seg
+
+
+def ml_openings(seg, clean, t, wall_box, mm_per_px, value):
+    """門窗:模型標出來的門 / 窗區塊為主;牆上還有沒被模型標到的缺口,用規則補上、依缺口裡模型的投票分門窗。"""
+    found = []
+    for kind, v in (("door", ml.DOOR), ("window", ml.WINDOW)):
+        for r in ml.opening_rects(seg, v, t):
+            found.append({"rect": r, "kind": kind, "outer": outer_of(r, wall_box, t)})
+
+    def overlaps(a, b):
+        ax, ay, aw, ah = a
+        bx, by, bw, bh = b
+        return ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah
+
+    for g in rz.classify(rz.find_openings(clean, t, 1 / mm_per_px), wall_box, t, value):
+        if any(overlaps(g["rect"], f["rect"]) for f in found):
+            continue
+        x, y, w, h = g["rect"]
+        sub = seg[max(0, y - t):y + h + t, max(0, x - t):x + w + t]
+        votes = {"door": int((sub == ml.DOOR).sum()), "window": int((sub == ml.WINDOW).sum())}
+        if max(votes.values()) > 0:
+            g["kind"] = max(votes, key=votes.get)
+        found.append(g)
+    return found
+
+
+def build_scene(src, width_mm=DEFAULT_WIDTH_MM, wall_height=DEFAULT_WALL_HEIGHT, with_background=True,
+                engine="rules"):
+    """width_mm = 外牆總寬(圖上最左到最右外牆外緣的實際長度);給 None 時用牆厚估比例尺。
+    engine:rules = 規則(深色粗線是牆)、ml = 機器學習分割模型、auto = 有模型就用模型。"""
     cv2.setRNGSeed(0)  # 家具分色用 k-means,固定亂數種子,同一張圖每次結果才一樣
     log = []
     im = rz.load_image(src)
-    raw, t = rz.wall_mask(im)
+    if engine == "auto":
+        engine = "ml" if ml.available() else "rules"
+    if engine == "ml":
+        if not ml.available():
+            raise rz.PlanError("機器學習模型不存在(backend/models/floorplan-seg.onnx),請改用規則辨識")
+        raw, t, seg = ml_walls(im)
+        log.append("[辨識方式] 機器學習模型")
+    else:
+        raw, t = rz.wall_mask(im)
+        seg = None
+        log.append("[辨識方式] 規則(深色粗線)")
     rects, leftovers, clean = rz.regularize_walls(raw, t)
     ys, xs = np.nonzero(clean)
     wall_box = (xs.min(), ys.min(), xs.max() + 1, ys.max() + 1)
@@ -253,7 +319,10 @@ def build_scene(src, width_mm=DEFAULT_WIDTH_MM, wall_height=DEFAULT_WALL_HEIGHT,
                    f"外牆總寬約 {width_px * mm_per_px / 1000:.1f} m(請核對)")
 
     value = cv2.cvtColor(im, cv2.COLOR_BGR2HSV)[..., 2]
-    openings = rz.classify(rz.find_openings(clean, t, 1 / mm_per_px), wall_box, t, value)
+    if seg is not None:
+        openings = ml_openings(seg, clean, t, wall_box, mm_per_px, value)
+    else:
+        openings = rz.classify(rz.find_openings(clean, t, 1 / mm_per_px), wall_box, t, value)
     walls_px, scene_walls, to_mm = make_walls(clean, t, mm_per_px, openings, wall_height, log)
     scene_openings, wall_dist = make_openings(openings, walls_px, scene_walls, clean, mm_per_px, log)
 
@@ -310,9 +379,10 @@ def main():
     ap.add_argument("--width", type=float, default=DEFAULT_WIDTH_MM, help="外牆總寬度 mm")
     ap.add_argument("--height", type=float, default=DEFAULT_WALL_HEIGHT, help="牆高 mm")
     ap.add_argument("-o", "--out", help="輸出 scene.json 路徑")
+    ap.add_argument("--engine", default="auto", choices=ENGINES, help="辨識方式")
     a = ap.parse_args()
     try:
-        r = build_scene(a.image, a.width, a.height)
+        r = build_scene(a.image, a.width, a.height, engine=a.engine)
     except rz.PlanError as e:
         sys.exit(str(e))
     print("\n".join(r.log))

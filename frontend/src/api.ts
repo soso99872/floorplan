@@ -13,6 +13,8 @@ export interface RecognizeInput {
   height: number
   /** CAD 圖層對應,蓋過自動判斷 */
   layers?: Record<string, LayerRole>
+  /** 圖片辨識方式 */
+  engine?: Engine
 }
 
 export async function recognize(input: RecognizeInput): Promise<RecognizeResponse> {
@@ -22,6 +24,7 @@ export async function recognize(input: RecognizeInput): Promise<RecognizeRespons
   if (input.width) form.append('width', String(input.width))
   form.append('height', String(input.height))
   if (input.layers) form.append('layers', JSON.stringify(input.layers))
+  if (input.engine) form.append('engine', input.engine)
   const r = await fetch('/api/recognize', { method: 'POST', body: form })
   const body = await r.json().catch(() => ({}))
   if (!r.ok) {
@@ -54,9 +57,11 @@ export async function exportDwg(scene: Scene): Promise<Blob> {
   return r.blob()
 }
 
-export async function getCapabilities(): Promise<{ dwg: boolean }> {
+export type Engine = 'auto' | 'ml' | 'rules'
+
+export async function getCapabilities(): Promise<{ dwg: boolean; ml: boolean }> {
   const r = await fetch('/api/capabilities').catch(() => null)
-  return r?.ok ? r.json() : { dwg: false }
+  return r?.ok ? r.json() : { dwg: false, ml: false }
 }
 
 // ---------- 分享連結 ----------

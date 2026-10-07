@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { exportDwg, exportDxf, getCapabilities, listSamples, recognize, type RecognizeInput } from './api'
+import { exportDwg, exportDxf, getCapabilities, listSamples, recognize, type Engine, type RecognizeInput } from './api'
 import { ExportMenu, type ExportItem } from './components/ExportMenu'
 import { ShareDialog } from './components/ShareDialog'
 import { openReport } from './export/report'
@@ -56,7 +56,8 @@ export default function App() {
   const [view, setView] = useState<ViewName>('iso')
   const [display, setDisplay] = useState({ wire: false, xray: false, furniture: true, plan: false, ceiling: false })
   const [walking, setWalking] = useState(false)
-  const [caps, setCaps] = useState({ dwg: false })
+  const [caps, setCaps] = useState({ dwg: false, ml: false })
+  const [engine, setEngine] = useState<Engine>('auto')
   const [sharing, setSharing] = useState(false)
   const [doorsOpen, setDoorsOpen] = useState(false)
   const [doorCount, setDoorCount] = useState(0)
@@ -114,7 +115,7 @@ export default function App() {
     setStatus({ kind: 'busy', text: '辨識中…' })
     try {
       const cad = isCad(input.file?.name ?? input.sample)
-      const r = await recognize({ ...input, width: cad ? undefined : width || undefined, height, layers: layerRoles })
+      const r = await recognize({ ...input, width: cad ? undefined : width || undefined, height, layers: layerRoles, engine })
       loadScene({ name: (input.file?.name ?? input.sample ?? 'floorplan').replace(/\.\w+$/, ''), scene: r.scene }, r)
       setStatus({
         kind: 'ok',
@@ -255,6 +256,14 @@ export default function App() {
                 onChange={(e) => setWidth(e.target.value === '' ? '' : Number(e.target.value))} /> mm</span>
               <label htmlFor="height">牆高</label>
               <span><input id="height" type="number" min={1} step={100} value={height} onChange={(e) => setHeight(Number(e.target.value))} /> mm</span>
+              <label htmlFor="engine">辨識方式</label>
+              <span>
+                <select id="engine" value={engine} onChange={(e) => setEngine(e.target.value as Engine)}>
+                  <option value="auto">自動{caps.ml ? '(機器學習)' : '(規則)'}</option>
+                  <option value="ml" disabled={!caps.ml}>機器學習{caps.ml ? '' : '(沒有模型)'}</option>
+                  <option value="rules">規則(深色粗線是牆)</option>
+                </select>
+              </span>
             </div>
             <p className="note">
               圖片的比例尺依「外牆總寬」換算(最左到最右外牆外緣的實際長度),留空會依牆厚估算。

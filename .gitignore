@@ -8,3 +8,7 @@ eval/data/
 eval/reports/
 .pytest_cache/
 backend/data/
+ml/.venv/
+ml/data/
+ml/runs/
+ml/*.out

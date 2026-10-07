@@ -101,10 +101,10 @@ def ground_truth(row):
 
 # ---------- 預測(Scene → 原圖像素) ----------
 
-def prediction(row):
+def prediction(row, engine="rules"):
     data = row["image"]["bytes"]
     t0 = time.time()
-    result = build_scene(data, None, 3000, with_background=False)
+    result = build_scene(data, None, 3000, with_background=False, engine=engine)
     elapsed = time.time() - t0
     scene = result.scene
     W, H = row["width"], row["height"]
@@ -279,7 +279,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--n", type=int, default=40)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--engine", default="rules", choices=["rules", "ml"], help="辨識方式")
     args = ap.parse_args()
+    global REPORTS
+    REPORTS = REPORTS / args.engine  # 規則和機器學習的報告分開放,方便並排比較
     if not DATA.exists():
         sys.exit(f"找不到資料 {DATA}。請先下載:\n  curl -L -o {DATA} "
                  "https://huggingface.co/datasets/phungpx/cubicassa5k-coco/resolve/main/data/valid-00000-of-00001.parquet")
@@ -291,7 +294,7 @@ def main():
         item = {"id": k, "name": name, "style": row["style"]}
         gt = ground_truth(row)
         try:
-            pred = prediction(row)
+            pred = prediction(row, args.engine)
         except (rz.PlanError, Exception) as e:  # 任何錯誤都記下來,繼續評下一張
             item["error"] = f"{type(e).__name__}: {e}"
             results.append(item)

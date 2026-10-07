@@ -20,7 +20,8 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from floorplan import recognize as rz
-from floorplan.build import DEFAULT_WALL_HEIGHT, build_scene, data_url
+from floorplan import ml
+from floorplan.build import DEFAULT_WALL_HEIGHT, ENGINES, build_scene, data_url
 from floorplan.cad_import import CadError, build_scene_from_cad, dxf_to_dwg, find_odafc
 from floorplan.dxf_export import export_dxf
 from floorplan.scene import Scene
@@ -75,6 +76,7 @@ async def recognize(
     width: float = Form(None, gt=0),  # 外牆總寬 mm;不給就用牆厚估比例尺
     height: float = Form(DEFAULT_WALL_HEIGHT, gt=0),
     layers: str = Form(None),  # CAD 圖層對應 JSON {"圖層名": "wall" | "door" | ...},蓋過自動判斷
+    engine: str = Form("auto"),  # 圖片辨識方式:auto / ml / rules
 ):
     """上傳平面圖圖片或 AutoCAD 檔(DXF / DWG),或指定範例名稱。
     回傳 Scene JSON、辨識疊圖、過程紀錄;CAD 檔另外回傳圖層清單。"""
@@ -108,7 +110,9 @@ async def recognize(
                 data = src.read_bytes() if isinstance(src, Path) else src
                 result = await run_in_threadpool(build_scene_from_cad, data, name, height, roles)
             else:
-                result = await run_in_threadpool(build_scene, src, width, height)
+                if engine not in ENGINES:
+                    raise HTTPException(400, "辨識方式只能是 auto、ml 或 rules")
+                result = await run_in_threadpool(build_scene, src, width, height, True, engine)
     except rz.PlanError as e:
         raise HTTPException(422, str(e))
     return {"scene": result.scene.model_dump(), "overlay": data_url(result.overlay_png), "log": result.log,
@@ -118,7 +122,7 @@ async def recognize(
 @app.get("/api/capabilities")
 def capabilities():
     """這台伺服器能做什麼(前端依此顯示按鈕):dwg = 有沒有安裝 ODA File Converter。"""
-    return {"dwg": find_odafc() is not None}
+    return {"dwg": find_odafc() is not None, "ml": ml.available()}
 
 
 @app.post("/api/export/dwg")
