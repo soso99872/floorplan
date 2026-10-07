@@ -6,7 +6,8 @@
   A-GLAZ       窗(三線窗)
   A-FURN       家具(每個型錄種類一個圖塊,圖塊名 FURN-<type>)
   A-AREA-IDEN  房間名稱與面積
-  A-DIMS       外牆總尺寸
+  A-DIMS       外牆尺寸:四邊的分段尺寸(牆段、門窗位置)+ 總尺寸
+  A-ANNO-TABL  房間面積表
 單位 mm,座標與 Scene 相同(y 向上)。
 """
 import io
@@ -26,7 +27,11 @@ LAYERS = {
     "A-FURN": 8,
     "A-AREA-IDEN": 2,
     "A-DIMS": 1,
+    "A-ANNO-TABL": 7,
 }
+PING_M2 = 400 / 121  # 1 坪 = 3.3058 m²
+CHAIN_GAP = 450  # 分段尺寸線離外牆的距離 mm
+TOTAL_GAP = 900  # 總尺寸線離外牆的距離 mm
 TEXT_HEIGHT = 250
 TEXT_STYLE = "CJK"  # 中文字要用 TrueType 字型,AutoCAD 預設的 SHX 字型顯示不出來
 TEXT_FONT = "msjh.ttc"
@@ -136,6 +141,100 @@ def furniture_block(doc, kind):
     return name
 
 
+DIM_STYLE = {"dimtxt": 200, "dimasz": 120, "dimexe": 80, "dimexo": 80, "dimdec": 0, "dimlfac": 1,
+             "dimtxsty": TEXT_STYLE, "dimtad": 1}
+
+
+def outer_box(scene):
+    xs = [c for w in scene.walls for c in (w.a[0], w.b[0])]
+    ys = [c for w in scene.walls for c in (w.a[1], w.b[1])]
+    t = max(w.thickness for w in scene.walls)
+    return min(xs) - t / 2, min(ys) - t / 2, max(xs) + t / 2, max(ys) + t / 2
+
+
+def chain_points(scene, side, box):
+    """外牆某一邊的分段點:兩端外角、門窗開口的兩側(沿那一邊的座標)。"""
+    x0, y0, x1, y1 = box
+    horizontal = side in ("bottom", "top")
+    face = {"bottom": y0, "top": y1, "left": x0, "right": x1}[side]
+    axis = 0 if horizontal else 1
+    pts = [x0, x1] if horizontal else [y0, y1]
+    walls = []
+    for w in scene.walls:
+        along_axis = abs(w.a[1 - axis] - w.b[1 - axis]) < 1  # 牆跟這一邊平行
+        center = w.a[1 - axis]
+        if along_axis and abs(abs(center - face) - w.thickness / 2) < w.thickness:
+            walls.append(w)
+    ids = {w.id: w for w in walls}
+    for o in scene.openings:
+        w = ids.get(o.wall)
+        if w is None:
+            continue
+        u, _, _ = wall_frame(w)
+        c = w.a[axis] + u[axis] * o.offset
+        pts += [c - o.width / 2, c + o.width / 2]
+    lo, hi = (x0, x1) if horizontal else (y0, y1)
+    out = []
+    for v in sorted(min(max(v, lo), hi) for v in pts):
+        if not out or v - out[-1] > 50:  # 太近的點(牆厚造成的小段)合併
+            out.append(v)
+    return out if len(walls) else []
+
+
+def add_dimensions(msp, scene):
+    box = outer_box(scene)
+    x0, y0, x1, y1 = box
+    attribs = {"layer": "A-DIMS"}
+    for side in ("bottom", "top", "left", "right"):
+        pts = chain_points(scene, side, box)
+        if len(pts) < 3:
+            continue
+        if side == "bottom":
+            msp.add_multi_point_linear_dim((0, y0 - CHAIN_GAP), [(v, y0) for v in pts], 0, override=DIM_STYLE, dxfattribs=attribs)
+        elif side == "top":
+            msp.add_multi_point_linear_dim((0, y1 + CHAIN_GAP), [(v, y1) for v in pts], 0, override=DIM_STYLE, dxfattribs=attribs)
+        elif side == "left":
+            msp.add_multi_point_linear_dim((x0 - CHAIN_GAP, 0), [(x0, v) for v in pts], 90, override=DIM_STYLE, dxfattribs=attribs)
+        else:
+            msp.add_multi_point_linear_dim((x1 + CHAIN_GAP, 0), [(x1, v) for v in pts], 90, override=DIM_STYLE, dxfattribs=attribs)
+    msp.add_linear_dim(base=(x0, y0 - TOTAL_GAP), p1=(x0, y0), p2=(x1, y0), angle=0,
+                       override=DIM_STYLE, dxfattribs=attribs).render()
+    msp.add_linear_dim(base=(x0 - TOTAL_GAP, y0), p1=(x0, y0), p2=(x0, y1), angle=90,
+                       override=DIM_STYLE, dxfattribs=attribs).render()
+
+
+def add_area_table(msp, scene):
+    """圖面右邊放一張房間面積表(名稱、m²、坪)。"""
+    if not scene.rooms:
+        return
+    _, _, x1, y1 = outer_box(scene)
+    x, y = x1 + TOTAL_GAP + 1500, y1
+    h = TEXT_HEIGHT
+    row = h * 1.8
+    cols = (0, 3000, 4600)  # 名稱、m²、坪 三欄的左緣
+    attribs = {"layer": "A-ANNO-TABL", "style": TEXT_STYLE, "height": h}
+
+    def line(texts, yy, align_right=(False, True, True)):
+        for (cx, text, right) in zip(cols, texts, align_right):
+            e = msp.add_text(text, dxfattribs=attribs)
+            if right:
+                e.set_placement((x + cx + 1300, yy), align=ezdxf.enums.TextEntityAlignment.BOTTOM_RIGHT)
+            else:
+                e.set_placement((x + cx, yy))
+
+    msp.add_text("房間面積表", dxfattribs={**attribs, "height": h * 1.4}).set_placement((x, y))
+    y -= row * 1.4
+    line(("房間", "面積 m²", "坪"), y)
+    msp.add_line((x, y - h * 0.4), (x + cols[2] + 1300, y - h * 0.4), dxfattribs={"layer": "A-ANNO-TABL"})
+    for r in scene.rooms:
+        y -= row
+        line((r.name, f"{r.area:.2f}", f"{r.area / PING_M2:.2f}"), y)
+    total = sum(r.area for r in scene.rooms)
+    msp.add_line((x, y - h * 0.4), (x + cols[2] + 1300, y - h * 0.4), dxfattribs={"layer": "A-ANNO-TABL"})
+    y -= row
+    line(("合計(室內)", f"{total:.2f}", f"{total / PING_M2:.2f}"), y)
+
+
 def export_dxf(scene: Scene) -> bytes:
     doc = ezdxf.new("R2013", setup=True)
     doc.units = units.MM
@@ -172,17 +271,8 @@ def export_dxf(scene: Scene) -> bytes:
         })
 
     if scene.walls:
-        xs = [c for w in scene.walls for c in (w.a[0], w.b[0])]
-        ys = [c for w in scene.walls for c in (w.a[1], w.b[1])]
-        t = max(w.thickness for w in scene.walls)
-        x0, x1, y0, y1 = min(xs) - t / 2, max(xs) + t / 2, min(ys) - t / 2, max(ys) + t / 2
-        gap = 800
-        style = {"dimtxt": TEXT_HEIGHT, "dimasz": 150, "dimexe": 80, "dimexo": 80, "dimdec": 0,
-                 "dimlfac": 1, "dimtxsty": TEXT_STYLE}
-        msp.add_linear_dim(base=(x0, y0 - gap), p1=(x0, y0), p2=(x1, y0), angle=0,
-                           override=style, dxfattribs={"layer": "A-DIMS"}).render()
-        msp.add_linear_dim(base=(x0 - gap, y0), p1=(x0, y0), p2=(x0, y1), angle=90,
-                           override=style, dxfattribs={"layer": "A-DIMS"}).render()
+        add_dimensions(msp, scene)
+        add_area_table(msp, scene)
 
     buf = io.StringIO()
     doc.write(buf)

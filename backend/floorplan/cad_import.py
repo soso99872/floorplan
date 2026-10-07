@@ -86,6 +86,22 @@ def find_odafc():
     return None
 
 
+def dxf_to_dwg(dxf: bytes) -> bytes:
+    """用 ODA File Converter 把 DXF 轉成 DWG(AutoCAD 2018 格式)。"""
+    exe = find_odafc()
+    if not exe:
+        raise CadError("伺服器沒有安裝 ODA File Converter,無法輸出 DWG;請下載 DXF,AutoCAD 可以直接開")
+    ezdxf.options.set("odafc-addon", "win_exec_path", exe)
+    with tempfile.TemporaryDirectory() as tmp:
+        src, dst = Path(tmp) / "plan.dxf", Path(tmp) / "plan.dwg"
+        src.write_bytes(dxf)
+        try:
+            odafc.convert(str(src), str(dst), version="R2018")
+        except odafc.ODAFCError as e:
+            raise CadError(f"DWG 轉檔失敗:{e}")
+        return dst.read_bytes()
+
+
 def read_document(data: bytes, filename: str):
     if filename.lower().endswith(".dwg"):
         exe = find_odafc()

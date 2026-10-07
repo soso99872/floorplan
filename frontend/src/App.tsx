@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { exportDxf, listSamples, recognize, type RecognizeInput } from './api'
+import { exportDwg, exportDxf, getCapabilities, listSamples, recognize, type RecognizeInput } from './api'
+import { ExportMenu, type ExportItem } from './components/ExportMenu'
+import { openReport } from './export/report'
+import { tablesCsv } from './export/tables'
 import { Viewer3D } from './components/Viewer3D'
 import { calibrationFactor, scaleScene, updateFurniture, remove } from './editor/commands'
 import { dist } from './editor/geometry'
@@ -52,6 +55,7 @@ export default function App() {
   const [view, setView] = useState<ViewName>('iso')
   const [display, setDisplay] = useState({ wire: false, xray: false, furniture: true, plan: false, ceiling: false })
   const [walking, setWalking] = useState(false)
+  const [caps, setCaps] = useState({ dwg: false })
   const [doorsOpen, setDoorsOpen] = useState(false)
   const [doorCount, setDoorCount] = useState(0)
   const [dragOver, setDragOver] = useState(false)
@@ -62,7 +66,7 @@ export default function App() {
   const projectInput = useRef<HTMLInputElement>(null)
   const freshLoad = useRef(false)
 
-  useEffect(() => { listSamples().then(setSamples) }, [])
+  useEffect(() => { listSamples().then(setSamples); getCapabilities().then(setCaps) }, [])
   const onViewerReady = useCallback((v: Viewer | null) => setViewer(v), [])
 
   function loadScene(p: Project, extra: typeof info) {
@@ -349,12 +353,17 @@ export default function App() {
             </div>
             <span className="spacer" />
             {scene && viewer && (
-              <div className="seg">
-                <button onClick={async () => {
-                  try { download(await exportDxf(scene), `${name}.dxf`) } catch (e) { setStatus({ kind: 'error', text: '✗ ' + (e as Error).message }) }
-                }}>下載 DXF</button>
-                <button onClick={async () => download(await viewer.exportGLB(), `${name}.glb`)}>下載 GLB</button>
-              </div>
+              <ExportMenu items={[
+                ['AutoCAD DXF', '平面圖、門窗、家具圖塊、尺寸、面積表', () => exportDxf(scene).then((b) => download(b, `${name}.dxf`))],
+                ...(caps.dwg ? [['AutoCAD DWG', '同 DXF,AutoCAD 2018 格式', () => exportDwg(scene).then((b) => download(b, `${name}.dwg`))] as ExportItem] : []),
+                ['SketchUp / OBJ', 'OBJ + 材質 + 地板貼圖(zip)', () => viewer.exportOBJ(name).then((b) => download(b, `${name}-obj.zip`))],
+                ['GLB', '網頁展示、Blender', () => viewer.exportGLB().then((b) => download(b, `${name}.glb`))],
+                ['面積表 CSV', 'Excel 直接開:房間面積(m²、坪)、門窗表', async () => download(tablesCsv(scene, name), `${name}-面積表.csv`)],
+                ['客戶報告 PDF', '透視圖、平面圖、面積表、門窗表(在列印視窗選「另存為 PDF」)', () => openReport(scene, name, async () => ({
+                  perspective: viewer.renderView('iso', 1800, 1100), plan: viewer.renderView('top', 1600, 1300),
+                }))],
+                ['高解析截圖', '目前 3D 視角,寬 3840 px', () => viewer.screenshotHiRes().then((b) => download(b, `${name}.png`))],
+              ]} onError={(e) => setStatus({ kind: 'error', text: '✗ ' + e.message })} />
             )}
           </div>
 

@@ -3,6 +3,7 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
+import { exportObjZip } from '../export/obj'
 import type { Point, Scene } from '../scene/types'
 import { buildScene, distToSegment, doorOfMesh, type BuiltScene, type DoorHandle } from './sceneBuilder'
 
@@ -182,7 +183,13 @@ export class Viewer {
     // 依比較窄的那個方向的視野決定距離:並排模式的 3D 畫面常常是直的,只看垂直視野會左右被裁掉
     const halfV = THREE.MathUtils.degToRad(this.camera.fov / 2)
     const half = Math.min(halfV, Math.atan(Math.tan(halfV) * this.camera.aspect))
-    const dist = r / Math.sin(half) * (name === 'iso' && this.camera.aspect >= 1 ? 0.85 : 1.05)
+    let dist = r / Math.sin(half) * (name === 'iso' && this.camera.aspect >= 1 ? 0.85 : 1.05)
+    if (name === 'top') {
+      // 俯視:直接讓平面的長寬貼合畫面(用外接球會留太多白)
+      const size = b.getSize(new THREE.Vector3())
+      const tanV = Math.tan(halfV), tanH = tanV * this.camera.aspect
+      dist = Math.max(size.y / 2 / tanV, size.x / 2 / tanH) * 1.08 + size.z
+    }
     this.camera.position.copy(c).addScaledVector(dir, dist)
     this.controls.target.copy(c)
     this.controls.update()
@@ -269,16 +276,54 @@ export class Viewer {
 
   /** 匯出 GLB(含顏色),門一律關著;給 SketchUp、Blender、網頁展示用 */
   async exportGLB(): Promise<Blob> {
+    const root = this.exportClone()
+    root.scale.setScalar(0.001) // glTF 單位是公尺
+    root.rotation.x = -Math.PI / 2 // glTF 是 Y 朝上
+    const data = await new GLTFExporter().parseAsync(root, { binary: true })
+    return new Blob([data as ArrayBuffer], { type: 'model/gltf-binary' })
+  }
+
+  /** OBJ + MTL + 貼圖的 zip(給 SketchUp 等) */
+  async exportOBJ(name: string): Promise<Blob> {
+    return exportObjZip(this.exportClone(), name)
+  }
+
+  /** 匯出用的模型複本:門一律關著、不含顯示用的稜線 */
+  private exportClone(): THREE.Object3D {
     if (!this.built) throw new Error('還沒有模型')
     const saved = this.doors.map((d) => d.t)
     for (const d of this.doors) { d.t = 0; this.poseDoor(d) }
     const root = this.built.root.clone()
-    root.remove(...root.children.filter((c) => c instanceof THREE.LineSegments)) // 稜線是顯示用的,不輸出
-    root.scale.setScalar(0.001) // glTF 單位是公尺
-    root.rotation.x = -Math.PI / 2 // glTF 是 Y 朝上
+    root.remove(...root.children.filter((c) => c instanceof THREE.LineSegments))
     this.doors.forEach((d, i) => { d.t = saved[i]; this.poseDoor(d) })
-    const data = await new GLTFExporter().parseAsync(root, { binary: true })
-    return new Blob([data as ArrayBuffer], { type: 'model/gltf-binary' })
+    return root
+  }
+
+  /** 用指定視角另外算一張圖(報告用),不影響使用者目前的畫面 */
+  renderView(name: ViewName, width: number, height: number): string {
+    if (!this.built) throw new Error('還沒有模型')
+    const size = this.renderer.getSize(new THREE.Vector2())
+    const ratio = this.renderer.getPixelRatio()
+    const saved = { pos: this.camera.position.clone(), target: this.controls.target.clone(), up: this.camera.up.clone(), auto: this.autoView }
+    const bg = this.scene3d.background
+    this.scene3d.background = new THREE.Color('#ffffff') // 報告要列印,白底比較好看
+    this.renderer.setPixelRatio(1)
+    this.renderer.setSize(width, height, false)
+    this.camera.aspect = width / height
+    this.setView(name)
+    this.renderer.render(this.scene3d, this.camera)
+    const url = this.renderer.domElement.toDataURL('image/jpeg', 0.9)
+    this.scene3d.background = bg
+    this.renderer.setPixelRatio(ratio)
+    this.renderer.setSize(size.x, size.y, false)
+    this.camera.aspect = size.x / Math.max(size.y, 1)
+    this.camera.position.copy(saved.pos)
+    this.camera.up.copy(saved.up)
+    this.controls.target.copy(saved.target)
+    this.camera.updateProjectionMatrix()
+    this.controls.update()
+    this.autoView = saved.auto
+    return url
   }
 
   screenshot(): string {

@@ -122,6 +122,25 @@ def test_api_cad(variants):
     assert r.status_code == 422
 
 
+def test_export_annotations(variants):
+    """匯出的 DXF 有四邊的分段尺寸、總尺寸,以及房間面積表(含坪數)。"""
+    doc = ezdxf.read(io.StringIO(variants["export"].decode("utf-8")))
+    msp = doc.modelspace()
+    assert len(msp.query('DIMENSION[layer=="A-DIMS"]')) > 10
+    texts = [e.dxf.text for e in msp.query('TEXT[layer=="A-ANNO-TABL"]')]
+    assert "房間面積表" in texts and "坪" in texts and any(t.startswith("合計") for t in texts)
+
+
+def test_api_capabilities_and_dwg(original):
+    client = TestClient(app)
+    caps = client.get("/api/capabilities").json()
+    r = client.post("/api/export/dwg", json=original.model_dump())
+    if caps["dwg"]:
+        assert r.status_code == 200 and len(r.content) > 1000
+    else:
+        assert r.status_code == 503 and "ODA" in r.json()["detail"]
+
+
 def test_api_export(original):
     client = TestClient(app)
     r = client.post("/api/export/dxf", json=original.model_dump())

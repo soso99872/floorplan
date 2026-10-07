@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from floorplan import recognize as rz
 from floorplan.build import DEFAULT_WALL_HEIGHT, build_scene, data_url
-from floorplan.cad_import import build_scene_from_cad
+from floorplan.cad_import import CadError, build_scene_from_cad, dxf_to_dwg, find_odafc
 from floorplan.dxf_export import export_dxf
 from floorplan.scene import Scene
 
@@ -81,6 +81,23 @@ async def recognize(
         raise HTTPException(422, str(e))
     return {"scene": result.scene.model_dump(), "overlay": data_url(result.overlay_png), "log": result.log,
             "cad": result.cad}
+
+
+@app.get("/api/capabilities")
+def capabilities():
+    """這台伺服器能做什麼(前端依此顯示按鈕):dwg = 有沒有安裝 ODA File Converter。"""
+    return {"dwg": find_odafc() is not None}
+
+
+@app.post("/api/export/dwg")
+async def export_dwg(scene: Scene):
+    """Scene JSON → AutoCAD DWG(需要伺服器安裝 ODA File Converter)。"""
+    try:
+        data = await run_in_threadpool(dxf_to_dwg, export_dxf(scene))
+    except CadError as e:
+        raise HTTPException(503, str(e))
+    return Response(data, media_type="application/acad",
+                    headers={"Content-Disposition": 'attachment; filename="floorplan.dwg"'})
 
 
 @app.post("/api/export/dxf")

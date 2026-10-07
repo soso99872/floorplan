@@ -42,3 +42,19 @@ export async function exportDxf(scene: Scene): Promise<Blob> {
   if (!r.ok) throw new Error(`匯出 DXF 失敗 (${r.status})`)
   return r.blob()
 }
+
+/** Scene → AutoCAD DWG(伺服器要有 ODA File Converter) */
+export async function exportDwg(scene: Scene): Promise<Blob> {
+  const r = await fetch('/api/export/dwg', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(scene),
+  })
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail ?? `匯出 DWG 失敗 (${r.status})`)
+  return r.blob()
+}
+
+export async function getCapabilities(): Promise<{ dwg: boolean }> {
+  const r = await fetch('/api/capabilities').catch(() => null)
+  return r?.ok ? r.json() : { dwg: false }
+}
