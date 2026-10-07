@@ -63,6 +63,32 @@
 | 客戶報告 PDF | 客戶 | 3D 透視、平面配置、面積表、門窗表;開新視窗後在列印對話框選「另存為 PDF」 |
 | 高解析截圖 | 簡報 | 目前視角、寬 3840 px |
 
+## 分享給客戶
+
+右上角「分享」→ 建立連結(`/s/<id>`),客戶打開是唯讀的 3D:旋轉、平面 / 正面視角、開門、天花板、走進去(電腦)、
+存圖、房間面積表(m²、坪);手機也能看。改了設計按「用目前的編輯更新」,同一個連結就會更新;「停止分享」後連結失效。
+
+沒有帳號系統:管理分享用的 token 只存在建立它的那台電腦的瀏覽器裡(伺服器只存雜湊),換電腦就不能更新或停止舊的連結。
+分享的場景存在 `DATA_DIR/shares/<id>.json`。上傳的圖檔、CAD 檔只在辨識時放在記憶體,不會寫到磁碟。
+
+注意:`start_preview.bat` 只開在本機(127.0.0.1),連結只有這台電腦打得開;要給客戶用,請部署到對外的主機(見下)。
+
+## 部署(Docker)
+
+```
+docker compose up -d          # http://localhost:8000,分享資料存在 floorplan-data volume
+```
+映像包含前端建置與後端 API(`Dockerfile`)。對外服務時請放在提供 HTTPS 的反向代理或平台後面
+(Render / Fly.io / Railway 都可以直接用這個 Dockerfile;資料夾 `/data` 要掛永久磁碟)。
+
+| 環境變數 | 預設 | 說明 |
+|---|---|---|
+| `DATA_DIR` | `backend/data`(Docker 是 `/data`) | 分享連結的存放位置 |
+| `RECOGNIZE_CONCURRENCY` | `2` | 同時進行的辨識數量,其他請求排隊 |
+| `ODA_CONVERTER` | 自動尋找 | ODA File Converter 路徑(讀寫 DWG);Docker 映像裡沒有附 |
+
+健康檢查:`GET /api/health`。
+
 ## 開發
 
 第一次設定:

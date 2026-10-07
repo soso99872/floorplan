@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { exportDwg, exportDxf, getCapabilities, listSamples, recognize, type RecognizeInput } from './api'
 import { ExportMenu, type ExportItem } from './components/ExportMenu'
+import { ShareDialog } from './components/ShareDialog'
 import { openReport } from './export/report'
 import { tablesCsv } from './export/tables'
 import { Viewer3D } from './components/Viewer3D'
@@ -56,6 +57,7 @@ export default function App() {
   const [display, setDisplay] = useState({ wire: false, xray: false, furniture: true, plan: false, ceiling: false })
   const [walking, setWalking] = useState(false)
   const [caps, setCaps] = useState({ dwg: false })
+  const [sharing, setSharing] = useState(false)
   const [doorsOpen, setDoorsOpen] = useState(false)
   const [doorCount, setDoorCount] = useState(0)
   const [dragOver, setDragOver] = useState(false)
@@ -205,6 +207,7 @@ export default function App() {
         <input ref={projectInput} type="file" accept=".json" hidden
           onChange={(e) => { const f = e.target.files?.[0]; if (f) openProject(f); e.target.value = '' }} />
         <button disabled={!scene} onClick={() => scene && download(projectBlob({ name, scene }), `${name}.fp3d.json`)}>儲存專案</button>
+        <button className="primary" disabled={!scene} onClick={() => setSharing(true)}>分享</button>
       </header>
       {restore && (
         <div className="banner">
@@ -418,6 +421,7 @@ export default function App() {
         )}
       </main>
 
+      {sharing && scene && <ShareDialog scene={scene} name={name} onClose={() => setSharing(false)} />}
       {measure && (
         <div className="modal" onClick={() => setMeasure(null)}>
           <form className="dialog" onClick={(e) => e.stopPropagation()} onSubmit={(e) => { e.preventDefault(); applyMeasure() }}>

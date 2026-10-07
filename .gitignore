@@ -7,3 +7,4 @@ frontend/dist/
 eval/data/
 eval/reports/
 .pytest_cache/
+backend/data/

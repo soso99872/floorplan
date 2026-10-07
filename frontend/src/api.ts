@@ -58,3 +58,34 @@ export async function getCapabilities(): Promise<{ dwg: boolean }> {
   const r = await fetch('/api/capabilities').catch(() => null)
   return r?.ok ? r.json() : { dwg: false }
 }
+
+// ---------- 分享連結 ----------
+
+export interface SharedScene { name: string; scene: Scene; updated: number }
+
+async function json<T>(r: Response, what: string): Promise<T> {
+  const body = await r.json().catch(() => ({}))
+  if (!r.ok) throw new Error(typeof body.detail === 'string' ? body.detail : `${what}失敗 (${r.status})`)
+  return body as T
+}
+
+export async function createShare(name: string, scene: Scene): Promise<{ id: string; token: string }> {
+  const r = await fetch('/api/shares', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, scene }) })
+  return json(r, '建立分享')
+}
+
+export async function updateShare(id: string, token: string, name: string, scene: Scene): Promise<void> {
+  const r = await fetch(`/api/shares/${encodeURIComponent(id)}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Share-Token': token }, body: JSON.stringify({ name, scene }),
+  })
+  await json(r, '更新分享')
+}
+
+export async function deleteShare(id: string, token: string): Promise<void> {
+  const r = await fetch(`/api/shares/${encodeURIComponent(id)}`, { method: 'DELETE', headers: { 'X-Share-Token': token } })
+  if (!r.ok && r.status !== 404) await json(r, '停止分享')
+}
+
+export async function getShare(id: string): Promise<SharedScene> {
+  return json(await fetch(`/api/shares/${encodeURIComponent(id)}`), '讀取分享')
+}

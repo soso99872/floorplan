@@ -1,0 +1,16 @@
+# 本機或自己的主機:docker compose up -d → http://localhost:8000
+# 分享連結存在 floorplan-data 這個 volume,更新映像不會遺失。
+services:
+  app:
+    build: .
+    image: floorplan-3d
+    ports:
+      - "8000:8000"
+    volumes:
+      - floorplan-data:/data
+    environment:
+      RECOGNIZE_CONCURRENCY: "2" # 同時辨識的數量;主機 CPU 多可以調高
+    restart: unless-stopped
+
+volumes:
+  floorplan-data:
