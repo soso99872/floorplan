@@ -7,6 +7,7 @@ import { Inspector } from './editor/Inspector'
 import { PlanView, type Tool } from './editor/PlanView'
 import { autosave, clearAutosave, loadAutosave, parseProject, projectBlob, type Project } from './editor/project'
 import { useEditor } from './editor/store'
+import { FLOOR_MATERIALS, floorMaterialId } from './scene/materials'
 import type { CadLayer, LayerRole, Point, RecognizeResponse } from './scene/types'
 import type { Viewer, ViewName } from './three/Viewer'
 
@@ -49,7 +50,8 @@ export default function App() {
   const [furnitureType, setFurnitureType] = useState('sofa')
   const [fitKey, setFitKey] = useState(0)
   const [view, setView] = useState<ViewName>('iso')
-  const [display, setDisplay] = useState({ wire: false, xray: false, furniture: true })
+  const [display, setDisplay] = useState({ wire: false, xray: false, furniture: true, plan: false, ceiling: false })
+  const [walking, setWalking] = useState(false)
   const [doorsOpen, setDoorsOpen] = useState(false)
   const [doorCount, setDoorCount] = useState(0)
   const [dragOver, setDragOver] = useState(false)
@@ -77,6 +79,7 @@ export default function App() {
   // Scene → 3D:載入時重設視角;編輯時保留視角,並用 requestAnimationFrame 合併連續的更新(拖曳中)
   useEffect(() => {
     if (!viewer) return
+    viewer.onWalkChange = setWalking
     viewer.onDoorsChange = () => {
       setDoorsOpen(viewer.allDoorsOpen)
       setDoorCount(viewer.doors.length)
@@ -137,6 +140,7 @@ export default function App() {
   // 快捷鍵(在輸入框裡打字時不觸發)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (viewer?.walking) return // 走動模式的按鍵由 3D 檢視器處理
       const t = e.target as HTMLElement
       if (t?.closest?.('input, select, textarea') || !scene) return
       const ctrl = e.ctrlKey || e.metaKey
@@ -155,7 +159,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [scene, editor])
+  }, [scene, editor, viewer])
 
   function applyMeasure() {
     if (!scene || !measure) return
@@ -165,6 +169,12 @@ export default function App() {
     editor.apply(scaleScene(scene, k))
     setStatus({ kind: 'ok', text: `比例尺已校正:整張圖縮放為原本的 ${k.toFixed(3)} 倍` })
     setMeasure(null)
+  }
+
+  function startWalk() {
+    if (layout !== 'plan') return viewer?.startWalk()
+    setLayout('3d') // 3D 畫面原本是隱藏的,等版面換好再進去
+    setTimeout(() => viewer?.startWalk(), 50)
   }
 
   function toggle(key: keyof typeof display) {
@@ -294,7 +304,7 @@ export default function App() {
                     {scene.rooms.map((r) => (
                       <tr key={r.id} className={editor.sel?.kind === 'room' && editor.sel.id === r.id ? 'sel' : ''}
                         onClick={() => editor.select({ kind: 'room', id: r.id })}>
-                        <td><i className="swatch" style={{ background: r.floor_color }} />{r.name}</td>
+                        <td><i className="swatch" style={{ background: FLOOR_MATERIALS[floorMaterialId(r)].swatch }} />{r.name}</td>
                         <td className="num">{r.area.toFixed(1)} m²</td>
                       </tr>
                     ))}
@@ -368,10 +378,24 @@ export default function App() {
                   <button className={doorsOpen ? 'on' : ''} title="也可以直接點某一扇門單獨開關"
                     onClick={() => viewer.setAllDoors(!doorsOpen)}>{doorsOpen ? '關門' : '開門'}</button>
                 )}
+                {scene && <>
+                  <button className={display.ceiling ? 'on' : ''} onClick={() => toggle('ceiling')}>天花板</button>
+                  {scene.meta.background && (
+                    <button className={display.plan ? 'on' : ''} title="地板改成顯示原始平面圖" onClick={() => toggle('plan')}>原圖</button>
+                  )}
+                  <button className={walking ? 'on' : ''} title="第一人稱走進房子裡看"
+                    onClick={() => (walking ? viewer?.stopWalk() : startWalk())}>{walking ? '離開' : '走進去'}</button>
+                  <button title="輸出 3840 px 寬的高解析截圖" onClick={async () => {
+                    if (viewer) download(await viewer.screenshotHiRes(), `${name}.png`)
+                  }}>截圖</button>
+                </>}
               </div>
               {!scene && <div className="empty">3D 預覽</div>}
               <Viewer3D onReady={onViewerReady} />
-              <div className="hint">左鍵旋轉 · 右鍵平移 · 滾輪縮放 · 點門可以開關</div>
+              <div className={'hint' + (walking ? ' walk' : '')}>
+                {walking ? 'W A S D / 方向鍵移動 · 滑鼠轉頭(沒鎖定時按住左鍵拖曳)· Shift 走快一點 · Esc 離開'
+                  : '左鍵旋轉 · 右鍵平移 · 滾輪縮放 · 點門可以開關'}
+              </div>
             </div>
           </div>
           {status.kind === 'busy' && <div className="spinner">辨識中…</div>}

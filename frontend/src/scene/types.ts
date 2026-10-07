@@ -34,7 +34,10 @@ export interface Room {
   name: string
   polygon: Point[]
   area: number
+  /** 原圖上的地板顏色 */
   floor_color: string
+  /** 地板材質 id(materials.ts);沒有或 null = 依房間名稱自動挑 */
+  floor_material?: string | null
 }
 
 /** 家具:(x, y) 是外框中心,angle 是局部 +x 的方向;局部 +y 指向背面(靠牆那側) */
@@ -62,6 +65,8 @@ export interface Scene {
     mm_per_px: number
     wall_height: number
     wall_thickness: number
+    /** 牆面顏色,舊檔案沒有這個欄位 */
+    wall_color?: string
     background: Background | null
   }
   walls: Wall[]

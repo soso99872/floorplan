@@ -170,7 +170,11 @@ export function updateFurniture(scene: Scene, id: string, patch: Partial<Furnitu
   return { ...scene, furniture: scene.furniture.map((f) => (f.id === id ? { ...f, ...patch } : f)) }
 }
 
-// ---------- 房間 ----------
+// ---------- 房間、整體設定 ----------
+
+export function updateMeta(scene: Scene, patch: Partial<Scene['meta']>): Scene {
+  return { ...scene, meta: { ...scene.meta, ...patch } }
+}
 
 export function updateRoom(scene: Scene, id: string, patch: Partial<Room>): Scene {
   return { ...scene, rooms: scene.rooms.map((r) => (r.id === id ? { ...r, ...patch } : r)) }

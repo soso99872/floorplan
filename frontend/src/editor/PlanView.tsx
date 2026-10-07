@@ -3,6 +3,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import polygonClipping, { type Polygon } from 'polygon-clipping'
 import type { Opening, Point, Scene, Wall } from '../scene/types'
 import { CATALOG } from '../scene/catalog'
+import { FLOOR_MATERIALS, floorMaterialId } from '../scene/materials'
 import {
   addFurniture, addOpening, addWall, moveEndpoint, moveOpening, moveWall, updateFurniture, type Sel,
 } from './commands'
@@ -308,7 +309,7 @@ export function PlanView({ editor, tool, furnitureType, fitKey, onTool, onMeasur
         {scene.rooms.map((r) => (
           <polygon key={r.id} data-kind="room" data-id={r.id} points={pts(r.polygon)}
             className={'room' + (sel?.kind === 'room' && sel.id === r.id ? ' sel' : '')}
-            style={{ fill: r.floor_color }} />
+            style={{ fill: FLOOR_MATERIALS[floorMaterialId(r)].swatch }} />
         ))}
 
         {scene.furniture.map((f) => {

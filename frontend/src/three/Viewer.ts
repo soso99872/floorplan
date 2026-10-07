@@ -2,8 +2,9 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
-import type { Scene } from '../scene/types'
-import { buildScene, doorOfMesh, type BuiltScene, type DoorHandle } from './sceneBuilder'
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
+import type { Point, Scene } from '../scene/types'
+import { buildScene, distToSegment, doorOfMesh, type BuiltScene, type DoorHandle } from './sceneBuilder'
 
 export type ViewName = 'iso' | 'front' | 'top' | 'right'
 
@@ -14,6 +15,21 @@ const VIEW_DIRS: Record<ViewName, [number, number, number]> = {
   right: [1, 0, 0],
 }
 const OPEN_DEG = 80
+const EYE_HEIGHT = 1600 // 第一人稱的眼睛高度 mm
+const WALK_SPEED = 1400 // mm/s,按住 Shift 加快
+const BODY_RADIUS = 220 // 走動時離牆至少這麼遠
+const SCREENSHOT_WIDTH = 3840
+
+/** 第一人稱走動的狀態 */
+interface Walk {
+  pos: Point
+  yaw: number
+  pitch: number
+  keys: Set<string>
+  /** 滑鼠曾經鎖定成功過 */
+  locked: boolean
+  saved: { pos: THREE.Vector3; target: THREE.Vector3; up: THREE.Vector3 }
+}
 
 export class Viewer {
   readonly renderer: THREE.WebGLRenderer
@@ -30,8 +46,14 @@ export class Viewer {
   private xray = false
   /** 最近一次自動對準的視角;使用者動過相機就清掉,之後畫面大小改變時不再自動重新對準 */
   private autoView: ViewName | null = null
+  private showPlan = false
+  private showCeiling = false
+  private walk: Walk | null = null
+  private lastFrame = performance.now()
   /** 門的狀態改變時通知外面(更新按鈕文字) */
   onDoorsChange: (() => void) | null = null
+  /** 進入 / 離開第一人稱時通知外面 */
+  onWalkChange: ((walking: boolean) => void) | null = null
 
   private host: HTMLElement
 
@@ -39,15 +61,28 @@ export class Viewer {
     this.host = host
     this.renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true })
     this.renderer.setPixelRatio(window.devicePixelRatio)
+    this.renderer.shadowMap.enabled = true
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping
+    this.renderer.toneMappingExposure = 0.9
     host.appendChild(this.renderer.domElement)
     this.scene3d.background = new THREE.Color('#20252e')
+    // 室內環境光(反射、柔和的補光),比單純的半球光更像真的房間
+    const pmrem = new THREE.PMREMGenerator(this.renderer)
+    this.scene3d.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture
+    this.scene3d.environmentIntensity = 0.4
     this.camera.up.set(0, 0, 1) // 建築習慣 Z 朝上
     this.controls = new OrbitControls(this.camera, this.renderer.domElement)
     this.controls.enableDamping = true
     this.controls.addEventListener('start', () => { this.autoView = null })
 
-    this.scene3d.add(new THREE.HemisphereLight(0xffffff, 0x445066, 1.0))
-    this.scene3d.add(this.sun)
+    this.scene3d.add(new THREE.HemisphereLight(0xffffff, 0x445066, 0.45))
+    this.sun.intensity = 2.4
+    this.sun.castShadow = true
+    this.sun.shadow.mapSize.set(2048, 2048)
+    this.sun.shadow.normalBias = 12
+    this.sun.shadow.bias = -0.0002
+    this.scene3d.add(this.sun, this.sun.target)
     const headlight = new THREE.DirectionalLight(0xffffff, 0.6)
     this.camera.add(headlight)
     this.scene3d.add(this.camera)
@@ -56,14 +91,20 @@ export class Viewer {
     this.resizeObserver.observe(host)
     this.resize()
     this.bindPointer()
+    this.bindWalkInput()
     this.renderer.setAnimationLoop(() => {
-      this.controls.update()
+      const now = performance.now()
+      const dt = Math.min(0.1, (now - this.lastFrame) / 1000)
+      this.lastFrame = now
+      if (this.walk) this.stepWalk(dt)
+      else this.controls.update()
       this.animateDoors()
       this.renderer.render(this.scene3d, this.camera)
     })
   }
 
   dispose() {
+    this.stopWalk()
     this.renderer.setAnimationLoop(null)
     this.resizeObserver.disconnect()
     this.controls.dispose()
@@ -99,15 +140,36 @@ export class Viewer {
       tex.colorSpace = THREE.SRGBColorSpace
       this.floor = new THREE.Mesh(new THREE.PlaneGeometry(bg.width, bg.height), new THREE.MeshBasicMaterial({ map: tex }))
       this.floor.position.set(bg.width / 2, bg.height / 2, -1)
+      this.floor.visible = this.showPlan || !scene.rooms.length
       this.scene3d.add(this.floor)
     }
+    this.built.ceilings.visible = this.showCeiling || !!this.walk
+    this.fitSun()
     this.applyMaterialMode()
+    if (this.walk) return this.onDoorsChange?.()
     if (!keepView || first) this.setView('iso')
     this.onDoorsChange?.()
   }
 
-  setView(name: ViewName) {
+  /** 太陽光的陰影範圍罩住整個模型 */
+  private fitSun() {
     if (!this.built) return
+    const b = this.built.bounds
+    const c = b.getCenter(new THREE.Vector3())
+    const r = b.getSize(new THREE.Vector3()).length() / 2
+    // 陽光從等角視角的另一側斜照進來,牆和家具的影子才會落在看得到的那一側
+    this.sun.position.copy(c).add(new THREE.Vector3(-1.2, 1.6, 2.2).normalize().multiplyScalar(r * 3))
+    this.sun.target.position.copy(c)
+    const cam = this.sun.shadow.camera
+    cam.left = cam.bottom = -r * 1.1
+    cam.right = cam.top = r * 1.1
+    cam.near = r
+    cam.far = r * 5
+    cam.updateProjectionMatrix()
+  }
+
+  setView(name: ViewName) {
+    if (!this.built || this.walk) return
     this.autoView = name
     const b = this.built.bounds
     const c = b.getCenter(new THREE.Vector3())
@@ -122,15 +184,18 @@ export class Viewer {
     const half = Math.min(halfV, Math.atan(Math.tan(halfV) * this.camera.aspect))
     const dist = r / Math.sin(half) * (name === 'iso' && this.camera.aspect >= 1 ? 0.85 : 1.05)
     this.camera.position.copy(c).addScaledVector(dir, dist)
-    this.sun.position.copy(c).add(new THREE.Vector3(1, -2, 3).multiplyScalar(r * 3))
     this.controls.target.copy(c)
     this.controls.update()
   }
 
-  setDisplay(opt: { wire?: boolean; xray?: boolean; furniture?: boolean }) {
+  setDisplay(opt: { wire?: boolean; xray?: boolean; furniture?: boolean; plan?: boolean; ceiling?: boolean }) {
     if (opt.wire !== undefined) this.wire = opt.wire
     if (opt.xray !== undefined) this.xray = opt.xray
+    if (opt.plan !== undefined) this.showPlan = opt.plan
+    if (opt.ceiling !== undefined) this.showCeiling = opt.ceiling
     if (opt.furniture !== undefined && this.built) this.built.furniture.visible = opt.furniture
+    if (this.floor) this.floor.visible = this.showPlan
+    if (this.built) this.built.ceilings.visible = this.showCeiling || !!this.walk
     this.applyMaterialMode()
   }
 
@@ -218,6 +283,121 @@ export class Viewer {
 
   screenshot(): string {
     return this.renderer.domElement.toDataURL('image/png')
+  }
+
+  /** 高解析截圖:目前的視角放大到寬 3840 px 重新算一張 */
+  async screenshotHiRes(): Promise<Blob> {
+    const size = this.renderer.getSize(new THREE.Vector2())
+    const ratio = this.renderer.getPixelRatio()
+    const scale = Math.min(SCREENSHOT_WIDTH / Math.max(size.x, 1), 8192 / Math.max(size.x, size.y, 1))
+    this.renderer.setPixelRatio(scale)
+    this.renderer.render(this.scene3d, this.camera)
+    const blob = await new Promise<Blob | null>((ok) => this.renderer.domElement.toBlob(ok, 'image/png'))
+    this.renderer.setPixelRatio(ratio)
+    this.renderer.setSize(size.x, size.y)
+    if (!blob) throw new Error('截圖失敗')
+    return blob
+  }
+
+  // ---------- 第一人稱 ----------
+
+  get walking() {
+    return !!this.walk
+  }
+
+  /** 走進去:從最大的房間中間開始;滑鼠看方向,W A S D / 方向鍵移動,Esc 離開 */
+  startWalk() {
+    if (!this.built || this.walk) return
+    const b = this.built.bounds
+    const start = this.built.walkStart ?? [(b.min.x + b.max.x) / 2, (b.min.y + b.max.y) / 2]
+    this.walk = {
+      pos: [start[0], start[1]], yaw: Math.PI / 2, pitch: -0.08, keys: new Set(), locked: false,
+      saved: { pos: this.camera.position.clone(), target: this.controls.target.clone(), up: this.camera.up.clone() },
+    }
+    this.controls.enabled = false
+    this.camera.up.set(0, 0, 1)
+    this.camera.near = 50
+    this.camera.far = 200000
+    this.camera.updateProjectionMatrix()
+    this.built.ceilings.visible = true
+    this.applyMaterialMode()
+    this.renderer.domElement.requestPointerLock?.()
+    this.stepWalk(0)
+    this.onWalkChange?.(true)
+  }
+
+  stopWalk() {
+    const w = this.walk
+    if (!w) return
+    this.walk = null
+    if (document.pointerLockElement === this.renderer.domElement) document.exitPointerLock()
+    this.controls.enabled = true
+    this.camera.up.copy(w.saved.up)
+    this.camera.position.copy(w.saved.pos)
+    this.controls.target.copy(w.saved.target)
+    if (this.built) this.built.ceilings.visible = this.showCeiling
+    if (this.autoView) this.setView(this.autoView)
+    else this.controls.update()
+    this.applyMaterialMode()
+    this.onWalkChange?.(false)
+  }
+
+  private look(dx: number, dy: number) {
+    if (!this.walk) return
+    this.walk.yaw -= dx * 0.0025
+    this.walk.pitch = Math.max(-1.3, Math.min(1.3, this.walk.pitch - dy * 0.0025))
+  }
+
+  private bindWalkInput() {
+    const el = this.renderer.domElement
+    const keys = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'ShiftLeft', 'ShiftRight']
+    window.addEventListener('keydown', (e) => {
+      if (!this.walk) return
+      if (e.code === 'Escape') { this.stopWalk(); return }
+      if (keys.includes(e.code)) { this.walk.keys.add(e.code); e.preventDefault() }
+    })
+    window.addEventListener('keyup', (e) => this.walk?.keys.delete(e.code))
+    window.addEventListener('blur', () => this.walk?.keys.clear())
+    document.addEventListener('mousemove', (e) => {
+      if (this.walk && document.pointerLockElement === el) this.look(e.movementX, e.movementY)
+    })
+    // 沒有鎖定滑鼠時(瀏覽器不允許或按過 Esc 一次),按住左鍵拖曳也可以看
+    el.addEventListener('pointermove', (e) => {
+      if (this.walk && document.pointerLockElement !== el && e.buttons === 1) this.look(e.movementX, e.movementY)
+    })
+    // 鎖定滑鼠時按 Esc 會被瀏覽器拿去解除鎖定、頁面收不到按鍵,所以解除鎖定就等於離開
+    document.addEventListener('pointerlockchange', () => {
+      if (!this.walk) return
+      if (document.pointerLockElement === el) this.walk.locked = true
+      else if (this.walk.locked) this.stopWalk()
+    })
+  }
+
+  private stepWalk(dt: number) {
+    const w = this.walk!
+    const k = w.keys
+    const f = (k.has('KeyW') || k.has('ArrowUp') ? 1 : 0) - (k.has('KeyS') || k.has('ArrowDown') ? 1 : 0)
+    const s = (k.has('KeyD') || k.has('ArrowRight') ? 1 : 0) - (k.has('KeyA') || k.has('ArrowLeft') ? 1 : 0)
+    if (f || s) {
+      const speed = (k.has('ShiftLeft') || k.has('ShiftRight') ? 2.2 : 1) * WALK_SPEED * dt
+      const fx = Math.cos(w.yaw), fy = Math.sin(w.yaw)
+      let dx = fx * f + fy * s, dy = fy * f - fx * s
+      const n = Math.hypot(dx, dy)
+      dx = (dx / n) * speed
+      dy = (dy / n) * speed
+      // 撞牆就沿著牆滑:先試整步,不行再只走 x 或只走 y
+      for (const [mx, my] of [[dx, dy], [dx, 0], [0, dy]]) {
+        const next: Point = [w.pos[0] + mx, w.pos[1] + my]
+        if (!this.blocked(next)) { w.pos = next; break }
+      }
+    }
+    const cp = Math.cos(w.pitch)
+    this.camera.position.set(w.pos[0], w.pos[1], EYE_HEIGHT)
+    this.camera.lookAt(w.pos[0] + Math.cos(w.yaw) * cp, w.pos[1] + Math.sin(w.yaw) * cp, EYE_HEIGHT + Math.sin(w.pitch))
+  }
+
+  private blocked(p: Point) {
+    return (this.built?.blockers ?? []).some(([a, b]) => distToSegment(p, a, b) < BODY_RADIUS)
   }
 }
 

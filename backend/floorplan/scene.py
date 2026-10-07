@@ -46,7 +46,8 @@ class Room(BaseModel):
     name: str
     polygon: List[Point]
     area: float  # m²
-    floor_color: str  # 原圖上的地板顏色 #rrggbb;之後換成材質 id
+    floor_color: str  # 原圖上的地板顏色 #rrggbb
+    floor_material: Optional[str] = None  # 地板材質 id(前端 materials.ts);None = 依房間名稱自動挑
 
 
 class Furniture(BaseModel):
@@ -74,6 +75,7 @@ class Meta(BaseModel):
     mm_per_px: float
     wall_height: float
     wall_thickness: float
+    wall_color: str = "#f2efe9"  # 牆面顏色
     background: Optional[Background] = None
 
 

@@ -2,7 +2,9 @@
 import type { ReactNode } from 'react'
 import type { Opening } from '../scene/types'
 import { CATALOG } from '../scene/catalog'
-import { remove, updateFurniture, updateOpening, updateRoom, updateWall, type Sel } from './commands'
+import { FLOOR_MATERIALS, autoFloor, floorMaterialId } from '../scene/materials'
+import { DEFAULT_WALL_COLOR } from '../three/sceneBuilder'
+import { remove, updateFurniture, updateMeta, updateOpening, updateRoom, updateWall, type Sel } from './commands'
 import { wallFrame } from './geometry'
 import type { Tool } from './PlanView'
 import type { Editor } from './store'
@@ -45,6 +47,19 @@ export function Inspector({ editor, tool, furnitureType, onFurnitureType, onTool
         {tool !== 'furniture' && (
           <button onClick={() => onTool('furniture')}>新增家具…</button>
         )}
+        <h2>整體設定</h2>
+        <div className="field">
+          <label>牆面顏色</label>
+          <span className="row tight">
+            <input type="color" value={scene.meta.wall_color ?? DEFAULT_WALL_COLOR}
+              onChange={(e) => editor.apply(updateMeta(scene, { wall_color: e.target.value }), 'meta:wall_color')} onBlur={editor.endMerge} />
+            {WALL_COLORS.map(([c, n]) => (
+              <button key={c} className="chip" title={n} style={{ background: c }}
+                onClick={() => editor.apply(updateMeta(scene, { wall_color: c }))} />
+            ))}
+          </span>
+        </div>
+        <p className="note">每個房間的地板材質:點選房間後在這裡選。</p>
         <h2>快捷鍵</h2>
         <table className="keys">
           <tbody>
@@ -140,10 +155,19 @@ export function Inspector({ editor, tool, furnitureType, onFurnitureType, onTool
           <input type="text" value={r.name} onChange={(e) => editor.apply(updateRoom(scene, r.id, { name: e.target.value }), key('n'))} onBlur={editor.endMerge} />
           <label>面積</label>
           <span>{r.area.toFixed(2)} m²</span>
-          <label>地板</label>
-          <input type="color" value={r.floor_color} onChange={(e) => editor.apply(updateRoom(scene, r.id, { floor_color: e.target.value }), key('c'))} onBlur={editor.endMerge} />
         </div>
-        <p className="note">房間由牆自動圍出,改牆之後會重新計算面積,名稱和顏色會保留。</p>
+        <h2>地板材質</h2>
+        <div className="materials">
+          <button className={!r.floor_material ? 'on' : ''} onClick={() => editor.apply(updateRoom(scene, r.id, { floor_material: null }))}>
+            <i style={{ background: FLOOR_MATERIALS[autoFloor(r.name)].swatch }} />自動(依房名)
+          </button>
+          {Object.entries(FLOOR_MATERIALS).map(([id, m]) => (
+            <button key={id} className={r.floor_material === id ? 'on' : ''} onClick={() => editor.apply(updateRoom(scene, r.id, { floor_material: id }))}>
+              <i style={{ background: m.swatch }} />{m.name}
+            </button>
+          ))}
+        </div>
+        <p className="note">目前:{FLOOR_MATERIALS[floorMaterialId(r)].name}。房間由牆自動圍出,改牆之後會重新計算面積,名稱和材質會保留。</p>
       </>
     )
   }
@@ -159,6 +183,10 @@ export function Inspector({ editor, tool, furnitureType, onFurnitureType, onTool
     </div>
   )
 }
+
+const WALL_COLORS: [string, string][] = [
+  ['#f2efe9', '米白'], ['#ffffff', '純白'], ['#e4ddd0', '奶茶'], ['#cfd6d2', '灰綠'], ['#c9cfd8', '霧藍'], ['#8a8f96', '深灰'],
+]
 
 function Num({ label, value, onChange, onDone, min, step = 10, unit = 'mm' }: {
   label: string; value: number; onChange: (v: number) => void; onDone: () => void; min?: number; step?: number; unit?: string

@@ -2,8 +2,9 @@
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import polygonClipping, { type MultiPolygon, type Polygon } from 'polygon-clipping'
-import type { Opening, Point, Scene, Wall } from '../scene/types'
+import type { Opening, Point, Room, Scene, Wall } from '../scene/types'
 import { doorParts, furnitureParts, windowParts, type Leaf, type Part } from '../scene/catalog'
+import { FLOOR_MATERIALS, floorMaterialId, floorTexture } from '../scene/materials'
 
 /** 一扇可以開關的門:pivots 是門片的鉸鏈群組,t 是目前打開的比例 0~1 */
 export interface DoorHandle {
@@ -24,9 +25,17 @@ export interface BuiltScene {
   walls: THREE.Mesh
   wallEdges: THREE.LineSegments
   furniture: THREE.Group
+  floors: THREE.Group
+  ceilings: THREE.Group
   doors: DoorHandle[]
   bounds: THREE.Box3
+  /** 第一人稱走動時擋路的線段(牆的平面外框,門和開放通道是開著的) */
+  blockers: [Point, Point][]
+  /** 走進去時的起點:最大房間的中心 */
+  walkStart: Point | null
 }
+
+export const DEFAULT_WALL_COLOR = '#f2efe9'
 
 // ---------- 牆的幾何 ----------
 
@@ -62,16 +71,19 @@ function extrudeMulti(mp: MultiPolygon, z0: number, z1: number): THREE.BufferGeo
  * 牆:所有牆段的平面聯集扣掉開口,擠出到牆高;開口上方的過樑、窗台下的矮牆另外擠出。
  * 先做平面聯集,轉角和 T 字接頭才不會有重疊的面和多餘的稜線。
  */
-function buildWalls(scene: Scene): THREE.BufferGeometry {
+function buildWalls(scene: Scene): { geo: THREE.BufferGeometry; blockers: [Point, Point][] } {
   const walls = new Map(scene.walls.map((w) => [w.id, w]))
   const strips = scene.walls.map((w) => wallStrip(w, 0, wallFrame(w).length, w.thickness))
   const holes: Polygon[] = []
+  const passable: Polygon[] = []
   const parts: THREE.BufferGeometry[] = []
+  const blockers: [Point, Point][] = []
   for (const o of scene.openings) {
     const w = walls.get(o.wall)
     if (!w) continue
     const s0 = o.offset - o.width / 2, s1 = o.offset + o.width / 2
     holes.push(wallStrip(w, s0, s1, w.thickness + 2))
+    if (o.kind !== 'window') passable.push(wallStrip(w, s0, s1, w.thickness + 2))
     const strip: MultiPolygon = [wallStrip(w, s0, s1, w.thickness)]
     if (o.head < w.height) parts.push(...extrudeMulti(strip, o.head, w.height)) // 過樑
     if (o.kind === 'window' && o.sill > 0) parts.push(...extrudeMulti(strip, 0, o.sill)) // 窗台下的牆
@@ -81,10 +93,100 @@ function buildWalls(scene: Scene): THREE.BufferGeometry {
     const cut = holes.length ? polygonClipping.difference(solid, ...holes) : solid
     const height = Math.max(...scene.walls.map((w) => w.height))
     parts.push(...extrudeMulti(cut, 0, height))
+    const walk = passable.length ? polygonClipping.difference(solid, ...passable) : solid
+    for (const poly of walk) for (const ring of poly) {
+      for (let i = 0; i + 1 < ring.length; i++) blockers.push([ring[i] as Point, ring[i + 1] as Point])
+    }
   }
-  const merged = mergeGeometries(parts)
+  const merged = parts.length ? mergeGeometries(parts) : new THREE.BufferGeometry()
   merged.computeVertexNormals()
-  return merged
+  return { geo: merged, blockers }
+}
+
+// ---------- 地板、天花板 ----------
+
+function roomShape(r: Room): THREE.Shape {
+  return new THREE.Shape(r.polygon.map(([x, y]) => new THREE.Vector2(x, y)))
+}
+
+const floorMatCache = new Map<string, THREE.MeshStandardMaterial>()
+function floorMaterial(id: string) {
+  let m = floorMatCache.get(id)
+  if (!m) {
+    m = new THREE.MeshStandardMaterial({ map: floorTexture(id), roughness: FLOOR_MATERIALS[id].roughness, metalness: 0 })
+    floorMatCache.set(id, m)
+  }
+  return m
+}
+
+/** 每個房間一塊地板,UV 用世界座標除以紋理尺寸,紋理才不會因房間大小變形 */
+function buildFloors(scene: Scene): THREE.Group {
+  const g = new THREE.Group()
+  for (const r of scene.rooms) {
+    if (r.polygon.length < 3) continue
+    const id = floorMaterialId(r)
+    const [sx, sy] = FLOOR_MATERIALS[id].size
+    const geo = new THREE.ShapeGeometry(roomShape(r))
+    const pos = geo.attributes.position
+    const uv = new Float32Array(pos.count * 2)
+    for (let i = 0; i < pos.count; i++) {
+      uv[2 * i] = pos.getX(i) / sx
+      uv[2 * i + 1] = pos.getY(i) / sy
+    }
+    geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2))
+    const mesh = new THREE.Mesh(geo, floorMaterial(id))
+    mesh.position.z = 1
+    mesh.receiveShadow = true
+    mesh.userData.roomId = r.id
+    g.add(mesh)
+  }
+  return g
+}
+
+const ceilingMat = new THREE.MeshStandardMaterial({ color: 0xf7f6f3, roughness: 0.95, side: THREE.DoubleSide })
+
+function buildCeilings(scene: Scene, height: number): THREE.Group {
+  const g = new THREE.Group()
+  for (const r of scene.rooms) {
+    if (r.polygon.length < 3) continue
+    const mesh = new THREE.Mesh(new THREE.ShapeGeometry(roomShape(r)), ceilingMat)
+    mesh.position.z = height - 1
+    mesh.receiveShadow = true
+    g.add(mesh)
+  }
+  g.visible = false
+  return g
+}
+
+/** 走進去的起點:最大房間裡離牆最遠的點(L 形房間的外框中心可能落在牆上) */
+function walkStartPoint(scene: Scene, blockers: [Point, Point][]): Point | null {
+  const r = [...scene.rooms].sort((a, b) => b.area - a.area)[0]
+  if (!r) return null
+  const box = new THREE.Box2().setFromPoints(r.polygon.map(([x, y]) => new THREE.Vector2(x, y)))
+  let best: Point | null = null, bestD = -1
+  const N = 24
+  for (let i = 1; i < N; i++) for (let j = 1; j < N; j++) {
+    const p: Point = [box.min.x + ((box.max.x - box.min.x) * i) / N, box.min.y + ((box.max.y - box.min.y) * j) / N]
+    if (!insidePolygon(p, r.polygon)) continue
+    const d = Math.min(...blockers.map(([a, b]) => distToSegment(p, a, b)))
+    if (d > bestD) { best = p; bestD = d }
+  }
+  return best
+}
+
+function insidePolygon(p: Point, poly: Point[]) {
+  let inside = false
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i], [xj, yj] = poly[j]
+    if ((yi > p[1]) !== (yj > p[1]) && p[0] < ((xj - xi) * (p[1] - yi)) / (yj - yi) + xi) inside = !inside
+  }
+  return inside
+}
+
+export function distToSegment(p: Point, a: Point, b: Point) {
+  const abx = b[0] - a[0], aby = b[1] - a[1]
+  const t = Math.max(0, Math.min(1, ((p[0] - a[0]) * abx + (p[1] - a[1]) * aby) / (abx * abx + aby * aby || 1)))
+  return Math.hypot(p[0] - a[0] - abx * t, p[1] - a[1] - aby * t)
 }
 
 // ---------- 零件 → mesh ----------
@@ -167,11 +269,13 @@ export function buildScene(scene: Scene): BuiltScene {
   const root = new THREE.Group()
   const doors: DoorHandle[] = []
 
-  const wallGeo = buildWalls(scene)
+  const { geo: wallGeo, blockers } = buildWalls(scene)
   const walls = new THREE.Mesh(wallGeo, new THREE.MeshStandardMaterial({
-    color: 0xf2efe9, roughness: 0.9, metalness: 0, side: THREE.DoubleSide,
+    color: scene.meta.wall_color ?? DEFAULT_WALL_COLOR, roughness: 0.9, metalness: 0, side: THREE.DoubleSide,
     polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
   }))
+  walls.castShadow = true
+  walls.receiveShadow = true
   root.add(walls)
   // 只畫真正的轉角(夾角大於 25°),共平面的接縫不畫
   const wallEdges = new THREE.LineSegments(new THREE.EdgesGeometry(wallGeo, 25), new THREE.LineBasicMaterial({ color: 0x14202e }))
@@ -192,7 +296,32 @@ export function buildScene(scene: Scene): BuiltScene {
   }
   root.add(furniture)
 
+  // 門窗、家具會投下陰影,也會接收陰影(玻璃不擋光)
+  root.traverse((m) => {
+    if (m instanceof THREE.Mesh && m !== walls) {
+      m.castShadow = !(m.material as THREE.Material).transparent
+      m.receiveShadow = true
+    }
+  })
+
+  // 家具也擋路(地毯可以踩過去)
+  for (const f of scene.furniture) {
+    if (f.type === 'rug') continue
+    const r = THREE.MathUtils.degToRad(f.angle)
+    const ux: Point = [Math.cos(r), Math.sin(r)], uy: Point = [-ux[1], ux[0]]
+    const c = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([i, j]): Point => [
+      f.x + (ux[0] * i * f.width + uy[0] * j * f.depth) / 2, f.y + (ux[1] * i * f.width + uy[1] * j * f.depth) / 2])
+    for (let i = 0; i < 4; i++) blockers.push([c[i], c[(i + 1) % 4]])
+  }
+
+  const floors = buildFloors(scene)
+  root.add(floors)
+  const height = scene.walls.length ? Math.max(...scene.walls.map((w) => w.height)) : scene.meta.wall_height
+  const ceilings = buildCeilings(scene, height)
+  root.add(ceilings)
+
   wallGeo.computeBoundingBox()
-  const bounds = wallGeo.boundingBox!.clone()
-  return { root, walls, wallEdges, furniture, doors, bounds }
+  const box = wallGeo.boundingBox
+  const bounds = box && !box.isEmpty() ? box.clone() : new THREE.Box3(new THREE.Vector3(), new THREE.Vector3(1000, 1000, 1000))
+  return { root, walls, wallEdges, furniture, floors, ceilings, doors, bounds, blockers, walkStart: walkStartPoint(scene, blockers) }
 }
