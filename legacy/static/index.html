@@ -1,0 +1,558 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>2D 轉 3D 預覽</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #ffffff; --ink: #1d2433; --muted: #6b7385; --line: #dfe3ea;
+    --accent: #2f6fdb; --ok: #1f9d55; --bad: #d64545; --warn: #c27c0e;
+    --front: #2f6fdb; --top: #1f9d55; --side: #d9822b;
+    --viewport: #20252e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #14171c; --panel: #1c2027; --ink: #e6e9ef; --muted: #8d95a5; --line: #2c323c; --viewport: #0f1216; }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+    font: 14px/1.5 "Microsoft JhengHei", "PingFang TC", "Noto Sans TC", system-ui, sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .sub { color: var(--muted); font-size: 13px; }
+  main { display: grid; grid-template-columns: 380px 1fr; height: calc(100% - 49px); }
+  aside { overflow-y: auto; border-right: 1px solid var(--line); background: var(--panel); padding: 14px; display: flex; flex-direction: column; gap: 14px; }
+  section h2 { font-size: 13px; margin: 0 0 6px; color: var(--muted); font-weight: 600; letter-spacing: .02em; }
+  #drop { border: 2px dashed var(--line); border-radius: 10px; padding: 18px 12px; text-align: center; cursor: pointer; transition: .15s; }
+  #drop:hover, #drop.over { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  #drop b { color: var(--accent); }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  button, select { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+  input[type=number] { font: inherit; width: 110px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 6px; padding: 3px 8px; }
+  .field { display: grid; grid-template-columns: 92px 1fr; gap: 6px 8px; align-items: center; }
+  .field label { color: var(--muted); }
+  .note { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
+  #overlay { width: 100%; border: 1px solid var(--line); border-radius: 8px; display: block; }
+  #drawing { width: 100%; aspect-ratio: 4 / 3; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; }
+  .legend { display: flex; gap: 12px; font-size: 12px; color: var(--muted); margin-top: 4px; flex-wrap: wrap; }
+  .legend i { display: inline-block; width: 14px; height: 3px; vertical-align: middle; margin-right: 4px; border-radius: 2px; }
+  #status { padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line); }
+  #status.ok { border-color: var(--ok); color: var(--ok); }
+  #status.bad { border-color: var(--bad); color: var(--bad); }
+  #status.busy { border-color: var(--warn); color: var(--warn); }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  td, th { padding: 3px 6px; border-bottom: 1px solid var(--line); text-align: left; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  #log { font: 12px/1.45 Consolas, "Cascadia Mono", monospace; white-space: pre-wrap; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px; max-height: 220px; overflow: auto; margin: 0; }
+  .stage { position: relative; background: var(--viewport); }
+  #view3d { position: absolute; inset: 0; }
+  .toolbar { position: absolute; top: 12px; left: 12px; display: flex; gap: 6px; flex-wrap: wrap; z-index: 2; }
+  .toolbar button { background: rgba(255,255,255,.92); color: #1d2433; border-color: transparent; }
+  .toolbar button.on { background: var(--accent); color: #fff; }
+  .downloads { position: absolute; top: 12px; right: 12px; display: flex; gap: 6px; z-index: 2; }
+  .downloads a { background: var(--accent); color: #fff; text-decoration: none; padding: 5px 12px; border-radius: 6px; font-size: 13px; }
+  .hint { position: absolute; bottom: 10px; left: 12px; color: #aab2c0; font-size: 12px; z-index: 2; }
+  #empty { position: absolute; inset: 0; display: grid; place-items: center; color: #8d95a5; font-size: 15px; z-index: 1; pointer-events: none; }
+  #spinner { position: absolute; inset: 0; display: none; place-items: center; background: rgba(15,18,22,.55); color: #fff; z-index: 3; font-size: 15px; }
+  #spinner.show { display: grid; }
+  @media (max-width: 860px) {
+    main { grid-template-columns: 1fr; grid-template-rows: auto 70vh; height: auto; }
+    aside { border-right: 0; border-bottom: 1px solid var(--line); }
+  }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<header>
+  <h1>2D 圖 → 3D 預覽</h1>
+  <span class="sub">機械三視圖 DXF,或建築平面圖圖片</span>
+</header>
+<main>
+  <aside>
+    <section>
+      <div id="drop">把 <b>.dxf</b> 或<b>平面圖圖片</b>拖到這裡,或點一下選檔
+        <input id="file" type="file" accept=".dxf,.png,.jpg,.jpeg,.webp,.bmp" hidden></div>
+      <div class="row" style="margin-top:8px">
+        <span style="color:var(--muted)">範例:</span><span id="samples" class="row"></span>
+      </div>
+    </section>
+
+    <section>
+      <h2>三視圖 DXF 設定</h2>
+      <div class="field">
+        <label for="angle">投影法</label>
+        <select id="angle">
+          <option value="">自動判斷</option>
+          <option value="third">第三角法</option>
+          <option value="first">第一角法</option>
+        </select>
+      </div>
+    </section>
+
+    <section>
+      <h2>平面圖圖片設定</h2>
+      <div class="field">
+        <label for="width">外牆總寬</label><span><input id="width" type="number" value="12000" min="1" step="100"> mm</span>
+        <label for="height">牆高</label><span><input id="height" type="number" value="3000" min="1" step="100"> mm</span>
+      </div>
+      <p class="note">圖片上讀不到尺寸數字,比例尺靠「外牆總寬」換算:填圖上最左到最右外牆外緣的實際長度。改完數字再按一次轉換即可。</p>
+      <div class="row" style="margin-top:6px"><button id="rerun" disabled>用新數字重新轉換</button></div>
+    </section>
+
+    <section>
+      <div id="status">尚未載入圖面</div>
+    </section>
+
+    <section id="viewsBox">
+      <h2>2D 圖面(程式辨識到的視圖)</h2>
+      <svg id="drawing"></svg>
+      <div class="legend">
+        <span><i style="background:var(--front)"></i>前視圖</span>
+        <span><i style="background:var(--top)"></i>俯視圖</span>
+        <span><i style="background:var(--side)"></i>側視圖</span>
+        <span>虛線 = 隱藏線</span>
+      </div>
+    </section>
+
+    <section id="planBox" hidden>
+      <h2>辨識結果(疊在原圖上)</h2>
+      <img id="overlay" alt="辨識結果">
+      <div class="legend">
+        <span><i style="background:#dc2828"></i>牆</span>
+        <span><i style="background:#1e8cdc"></i>窗</span>
+        <span><i style="background:#3cb43c"></i>門 / 開口</span>
+        <span><i style="background:#c83cc8"></i>家具</span>
+      </div>
+      <p class="note">門窗會放上實際的門片、窗框和玻璃;沒標到的門(牆線畫成連續的)在 3D 裡會是實心牆。家具高度是依種類套用常見尺寸(床 55、桌 75、衣櫃 200 cm…),圖上沒有高度資訊。</p>
+    </section>
+
+    <section id="resultBox" hidden>
+      <h2>結果</h2>
+      <table id="result"></table>
+    </section>
+
+    <section>
+      <h2>轉換紀錄</h2>
+      <pre id="log">—</pre>
+    </section>
+  </aside>
+
+  <div class="stage">
+    <div class="toolbar">
+      <button data-view="iso" class="on">等角</button>
+      <button data-view="front">前</button>
+      <button data-view="top">上</button>
+      <button data-view="right">右</button>
+      <button id="wire">線框</button>
+      <button id="xray">透視</button>
+      <button id="furnBtn" class="on" hidden>家具</button>
+      <button id="doorBtn" hidden title="也可以直接點某一扇門單獨開關">開門</button>
+    </div>
+    <div class="downloads" id="downloads" hidden>
+      <a id="dlStep" href="#">下載 STEP</a>
+      <a id="dlStl" href="#">下載 STL</a>
+    </div>
+    <div id="empty">左邊載入 DXF / 平面圖圖片,或點選範例</div>
+    <div id="spinner">轉換中…複雜的圖可能要幾十秒</div>
+    <div id="view3d"></div>
+    <div class="hint">左鍵旋轉 · 右鍵平移 · 滾輪縮放 · 點門可以開關</div>
+  </div>
+</main>
+
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+const $ = (id) => document.getElementById(id);
+const VIEW_NAMES = { front: "前視圖", top: "俯視圖", side: "側視圖" };
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+// ---------- 3D 場景 ----------
+const host = $("view3d");
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+host.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(css("--viewport") || "#20252e");
+const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 10000);
+camera.up.set(0, 0, 1);  // 工程圖習慣 Z 朝上
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x445066, 1.0));
+const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+scene.add(sun);
+scene.add(camera);
+const headlight = new THREE.DirectionalLight(0xffffff, 0.6);
+camera.add(headlight);
+
+const modelGroup = new THREE.Group();
+scene.add(modelGroup);
+let meshMat, edgeMat, bounds = null;
+const texLoader = new THREE.TextureLoader();
+
+function resize() {
+  const w = host.clientWidth, h = host.clientHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w / Math.max(h, 1);
+  camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe(host);
+resize();
+
+renderer.setAnimationLoop(() => {
+  controls.update();
+  animateDoors();
+  renderer.render(scene, camera);
+});
+window.viewer = { camera, controls, get doors() { return doors; } };  // 方便在瀏覽器主控台調整視角、檢查門的狀態
+
+function showModel(data) {
+  modelGroup.clear();
+  doors.length = 0;
+  allDoorsOpen = false;
+  $("doorBtn").classList.remove("on");
+  $("doorBtn").textContent = "開門";
+  isPlan = data.kind === "plan";
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(data.mesh.positions, 3));
+  geo.setIndex(data.mesh.indices);
+  geo.computeVertexNormals();
+  meshMat = new THREE.MeshStandardMaterial({
+    color: data.kind === "plan" ? 0xf2efe9 : 0x9cbbe0, metalness: 0.15, roughness: 0.55, side: THREE.DoubleSide,
+    polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
+  });
+  modelGroup.add(new THREE.Mesh(geo, meshMat));
+
+  let eg;
+  if (data.kind === "plan") {
+    // 從圖片描出來的牆面難免有細微轉折,只畫真正的轉角(夾角大於 25°)
+    eg = new THREE.EdgesGeometry(geo, 25);
+  } else {
+    const seg = [];
+    for (const pl of data.edges) for (let i = 0; i < pl.length - 1; i++) seg.push(...pl[i], ...pl[i + 1]);
+    eg = new THREE.BufferGeometry();
+    eg.setAttribute("position", new THREE.Float32BufferAttribute(seg, 3));
+  }
+  edgeMat = new THREE.LineBasicMaterial({ color: 0x14202e });
+  modelGroup.add(new THREE.LineSegments(eg, edgeMat));
+
+  geo.computeBoundingBox();
+  bounds = geo.boundingBox;
+  const size = bounds.getSize(new THREE.Vector3());
+  const r = size.length() / 2;
+  camera.near = r / 500;
+  camera.far = r * 40;
+  camera.updateProjectionMatrix();
+
+  if (data.floor) {
+    // 平面圖原圖當地板貼圖:圖片左下角對齊模型原點,大小用同一個比例尺換算
+    const [fw, fh] = data.floor.size;
+    const tex = texLoader.load("data:image/png;base64," + data.floor.image);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(fw, fh), new THREE.MeshBasicMaterial({ map: tex }));
+    floor.position.set(fw / 2, fh / 2, -r / 2000);
+    modelGroup.add(floor);
+  } else {
+    const grid = new THREE.GridHelper(Math.ceil(Math.max(size.x, size.y) * 2 / 10) * 10, 20, 0x5a6475, 0x3a4250);
+    grid.rotation.x = Math.PI / 2;  // 放到 XY 平面
+    grid.position.set((bounds.min.x + bounds.max.x) / 2, (bounds.min.y + bounds.max.y) / 2, bounds.min.z - r / 2000);
+    modelGroup.add(grid);
+  }
+  const axes = new THREE.AxesHelper(Math.max(size.x, size.y, size.z) * 0.35);
+  axes.position.copy(bounds.min);
+  modelGroup.add(axes);
+
+  // 門窗是建築的一部分,一直顯示;家具可以用按鈕開關
+  for (const f of data.fittings || []) modelGroup.add(furnitureMesh(f));
+  furnitureGroup = new THREE.Group();
+  for (const f of data.furniture || []) furnitureGroup.add(furnitureMesh(f));
+  furnitureGroup.visible = showFurniture;
+  modelGroup.add(furnitureGroup);
+  $("furnBtn").hidden = !(data.furniture && data.furniture.length);
+  $("doorBtn").hidden = doors.length === 0;
+
+  applyMaterialMode();
+  setView("iso");
+  $("empty").style.display = "none";
+}
+
+// 家具:由 furniture.py 產生的零件(方塊 / 圓柱 / 圓錐)組成,局部座標轉到擺放位置與方向。
+// 稍微浮起一點,避免底面跟地板貼圖閃爍
+let furnitureGroup = null, showFurniture = true;
+const matCache = new Map();
+function partMaterial(color, opacity = 1) {
+  const key = color + "/" + opacity;
+  if (!matCache.has(key)) {
+    const glass = opacity < 1;
+    matCache.set(key, new THREE.MeshStandardMaterial({
+      color, roughness: glass ? 0.05 : 0.72, metalness: glass ? 0.1 : 0.04,
+      transparent: glass, opacity, depthWrite: !glass, side: glass ? THREE.DoubleSide : THREE.FrontSide,
+    }));
+  }
+  return matCache.get(key);
+}
+function partMesh(p) {
+  let mesh;
+    if (p.kind === "box") {
+      mesh = new THREE.Mesh(new THREE.BoxGeometry(...p.s), partMaterial(p.color, p.opacity ?? 1));
+      mesh.position.set(...p.c);
+      if (p.rz) mesh.rotation.z = THREE.MathUtils.degToRad(p.rz);  // 半開的門片
+    } else {
+      // CylinderGeometry 預設沿 Y 軸、以中心為原點;轉成沿 Z、底面在 c 的高度
+      const geo = new THREE.CylinderGeometry(p.r[1], p.r[0], p.h, 40);
+      geo.rotateX(Math.PI / 2);
+      geo.translate(0, 0, p.h / 2);
+      geo.scale(p.sx || 1, p.sy || 1, 1);
+      mesh = new THREE.Mesh(geo, partMaterial(p.color));
+      mesh.position.set(...p.c);
+    }
+  return mesh;
+}
+function furnitureMesh(f) {
+  const group = new THREE.Group();
+  for (const p of f.parts) group.add(partMesh(p));
+  // 門片:放在以鉸鏈為原點的樞紐群組裡,轉樞紐就是開關門。預設關著,避免門片穿過家具
+  if (f.leaves && f.leaves.length) {
+    const door = { pivots: [], open: false, t: 0 };
+    for (const lf of f.leaves) {
+      const pivot = new THREE.Group();
+      pivot.position.set(lf.hinge[0], lf.hinge[1], 0);
+      pivot.userData.side = lf.side;
+      for (const p of lf.parts) {
+        const m = partMesh(p);
+        m.userData.door = door;  // 點到門片時找得到是哪一扇門
+        pivot.add(m);
+      }
+      group.add(pivot);
+      door.pivots.push(pivot);
+    }
+    doors.push(door);
+  }
+  group.rotation.z = THREE.MathUtils.degToRad(f.angle);
+  group.position.set(f.x, f.y, 2);
+  group.userData.name = f.name;
+  return group;
+}
+// ---------- 開關門 ----------
+const doors = [];
+const OPEN_DEG = 80;
+let allDoorsOpen = false;
+function animateDoors() {
+  for (const d of doors) {
+    const target = d.open ? 1 : 0;
+    if (Math.abs(d.t - target) < 1e-3) continue;
+    d.t += Math.sign(target - d.t) * Math.min(0.06, Math.abs(target - d.t));
+    const ease = d.t * d.t * (3 - 2 * d.t);
+    for (const pv of d.pivots) pv.rotation.z = -pv.userData.side * THREE.MathUtils.degToRad(OPEN_DEG) * ease;
+  }
+}
+$("doorBtn").onclick = () => {
+  allDoorsOpen = !allDoorsOpen;
+  for (const d of doors) d.open = allDoorsOpen;
+  $("doorBtn").classList.toggle("on", allDoorsOpen);
+  $("doorBtn").textContent = allDoorsOpen ? "關門" : "開門";
+};
+// 點一下門片:只開關那一扇。拖曳旋轉視角時不觸發
+const raycaster = new THREE.Raycaster();
+let downAt = null;
+renderer.domElement.addEventListener("pointerdown", (e) => { downAt = [e.clientX, e.clientY]; });
+renderer.domElement.addEventListener("pointerup", (e) => {
+  if (!downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 4 || !doors.length) return;
+  const rect = renderer.domElement.getBoundingClientRect();
+  const ndc = new THREE.Vector2(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
+  raycaster.setFromCamera(ndc, camera);
+  const hit = raycaster.intersectObjects(modelGroup.children, true).find((h) => h.object.visible);
+  const door = hit && hit.object.userData.door;
+  if (door) door.open = !door.open;
+});
+renderer.domElement.addEventListener("pointermove", (e) => {
+  if (!doors.length || e.buttons) return;
+  const rect = renderer.domElement.getBoundingClientRect();
+  const ndc = new THREE.Vector2(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
+  raycaster.setFromCamera(ndc, camera);
+  const hit = raycaster.intersectObjects(modelGroup.children, true).find((h) => h.object.visible);
+  renderer.domElement.style.cursor = hit && hit.object.userData.door ? "pointer" : "";
+});
+
+$("furnBtn").onclick = () => {
+  showFurniture = !showFurniture;
+  $("furnBtn").classList.toggle("on", showFurniture);
+  if (furnitureGroup) furnitureGroup.visible = showFurniture;
+};
+
+const VIEW_DIRS = { iso: [1, -1.2, 0.9], front: [0, -1, 0], top: [0, 0, 1], right: [1, 0, 0] };
+let isPlan = false;
+function setView(name) {
+  document.querySelectorAll("[data-view]").forEach((b) => b.classList.toggle("on", b.dataset.view === name));
+  if (!bounds) return;
+  const c = bounds.getCenter(new THREE.Vector3());
+  const r = bounds.getSize(new THREE.Vector3()).length() / 2;
+  // 平面圖又扁又寬:等角視角放低、拉近一點,才看得出牆的高度和房間
+  const dir = new THREE.Vector3(...(isPlan && name === "iso" ? [0.45, -1, 0.8] : VIEW_DIRS[name])).normalize();
+  const zoom = isPlan && name === "iso" ? 0.85 : 1.1;
+  camera.up.set(0, name === "top" ? 1 : 0, name === "top" ? 0 : 1);
+  camera.position.copy(c).addScaledVector(dir, r / Math.sin(THREE.MathUtils.degToRad(camera.fov / 2)) * zoom);
+  sun.position.copy(c).add(new THREE.Vector3(1, -2, 3).multiplyScalar(r * 3));
+  controls.target.copy(c);
+  controls.update();
+}
+document.querySelectorAll("[data-view]").forEach((b) => b.addEventListener("click", () => setView(b.dataset.view)));
+
+let wire = false, xray = false;
+function applyMaterialMode() {
+  if (!meshMat) return;
+  meshMat.visible = !wire;
+  meshMat.transparent = xray;
+  meshMat.opacity = xray ? 0.35 : 1;
+  meshMat.depthWrite = !xray;
+  edgeMat.depthTest = !xray;  // 透視模式下看得到被擋住的邊(孔的內部)
+  edgeMat.color.set(wire || xray ? 0xe3ebf7 : 0x14202e);  // 沒有實體面當底色時,深色邊會跟背景混在一起
+}
+$("wire").onclick = () => { wire = !wire; $("wire").classList.toggle("on", wire); applyMaterialMode(); };
+$("xray").onclick = () => { xray = !xray; $("xray").classList.toggle("on", xray); applyMaterialMode(); };
+
+// ---------- 2D 圖面 ----------
+function showDrawing(drawing) {
+  const svg = $("drawing");
+  const all = Object.values(drawing).flat().flatMap((l) => l.pts);
+  const xs = all.map((p) => p[0]), ys = all.map((p) => p[1]);
+  const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+  const pad = Math.max(x1 - x0, y1 - y0) * 0.08;
+  svg.setAttribute("viewBox", `${x0 - pad} ${-(y1 + pad * 2)} ${x1 - x0 + pad * 2} ${y1 - y0 + pad * 3}`);
+  const stroke = (Math.max(x1 - x0, y1 - y0) / 300).toFixed(3);
+  let out = "";
+  for (const [view, lines] of Object.entries(drawing)) {
+    const color = css(`--${view}`);
+    let vx0 = Infinity, vy1 = -Infinity;
+    for (const l of lines) {
+      const d = l.pts.map((p, i) => `${i ? "L" : "M"}${p[0]},${-p[1]}`).join("");
+      out += `<path d="${d}" fill="none" stroke="${color}" stroke-width="${stroke}" vector-effect="non-scaling-stroke"
+        ${l.hidden ? `stroke-dasharray="4 3" opacity=".7"` : ""}/>`;
+      for (const p of l.pts) { vx0 = Math.min(vx0, p[0]); vy1 = Math.max(vy1, p[1]); }
+    }
+    out += `<text x="${vx0}" y="${-vy1 - pad * 0.35}" fill="${color}" font-size="${pad * 0.7}">${VIEW_NAMES[view]}</text>`;
+  }
+  svg.innerHTML = out;
+}
+
+// ---------- 結果 ----------
+const fmt = (v, n = 2) => Number(v).toLocaleString("zh-TW", { minimumFractionDigits: n, maximumFractionDigits: n });
+
+function showDownloads(d) {
+  $("dlStep").href = d.downloads.step;
+  $("dlStl").href = d.downloads.stl;
+  $("downloads").hidden = false;
+}
+
+function showPlanResult(d) {
+  $("viewsBox").hidden = true;
+  $("planBox").hidden = false;
+  $("overlay").src = "data:image/png;base64," + d.overlay;
+  const rows = [
+    ["檔名", d.name],
+    ["牆體外形 X × Y", d.size.slice(0, 2).map((v) => fmt(v, 0)).join(" × ") + " mm"],
+    ["牆高", fmt(d.size[2], 0) + " mm"],
+    ["牆厚(估計)", fmt(d.thickness, 0) + " mm"],
+    ["窗", d.openings.window + " 個(窗台 900、上緣 2100 mm)"],
+    ["門 / 開口", d.openings.door + " 個(上緣 2100 mm;寬 1.2~1.8 m 雙開門,超過 1.8 m 為開放通道)"],
+  ];
+  if (d.furniture && d.furniture.length) {
+    const counts = {};
+    for (const f of d.furniture) counts[f.name] = (counts[f.name] || 0) + 1;
+    rows.push(["家具", d.furniture.length + " 件:" + Object.entries(counts).map(([k, v]) => `${k} ${v}`).join("、")]);
+  }
+  $("result").innerHTML = rows.map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join("");
+  $("resultBox").hidden = false;
+  showDownloads(d);
+}
+
+function showResult(d) {
+  $("viewsBox").hidden = false;
+  $("planBox").hidden = true;
+  const rows = [
+    ["檔名", d.name],
+    ["投影法", d.angle === "first" ? "第一角法" : "第三角法"],
+    ["外形 X × Y × Z", d.size.map((v) => fmt(v, 3)).join(" × ") + " mm"],
+    ["體積", fmt(d.volume) + " mm³"],
+  ];
+  let html = rows.map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join("");
+  html += `<tr><th>驗證</th><td>輪廓差異 / 多餘邊線</td></tr>`;
+  for (const [v, e] of Object.entries(d.errs))
+    html += `<tr><td>${VIEW_NAMES[v]}</td><td class="num">${(e.area * 100).toFixed(3)}% / ${e.extra.toFixed(2)} mm</td></tr>`;
+  $("result").innerHTML = html;
+  $("resultBox").hidden = false;
+  showDownloads(d);
+}
+
+function setStatus(text, cls) {
+  $("status").textContent = text;
+  $("status").className = cls || "";
+}
+
+let lastForm = null;
+async function run(form) {
+  lastForm = form;
+  $("rerun").disabled = false;
+  form.set("angle", $("angle").value);
+  form.set("width", $("width").value);
+  form.set("height", $("height").value);
+  setStatus("轉換中…", "busy");
+  $("spinner").classList.add("show");
+  try {
+    const res = await fetch("/api/convert", { method: "POST", body: form });
+    const d = await res.json();
+    $("log").textContent = (d.log || []).join("\n") || "—";
+    if (!res.ok) { setStatus("✗ " + d.error, "bad"); return; }
+    showModel(d);
+    if (d.kind === "plan") {
+      showPlanResult(d);
+      setStatus("✓ 已產生牆體模型。尺寸是用你填的外牆總寬換算的,請核對門窗位置", "ok");
+    } else {
+      showDrawing(d.drawing);
+      showResult(d);
+      setStatus(d.ok ? "✓ 驗證通過:3D 模型投影回去與每個視圖一致"
+                     : "⚠ 驗證不通過:模型與圖面有出入,請對照檢查", d.ok ? "ok" : "bad");
+    }
+  } catch (e) {
+    setStatus("✗ 無法連到轉換服務:" + e.message, "bad");
+  } finally {
+    $("spinner").classList.remove("show");
+  }
+}
+
+function runFile(file) {
+  if (!file) return;
+  const f = new FormData();
+  f.append("file", file);
+  run(f);
+}
+
+$("rerun").onclick = () => lastForm && run(lastForm);
+
+const drop = $("drop");
+drop.onclick = () => $("file").click();
+$("file").onchange = (e) => runFile(e.target.files[0]);
+drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
+drop.ondragleave = () => drop.classList.remove("over");
+drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); runFile(e.dataTransfer.files[0]); };
+
+fetch("/api/samples").then((r) => r.json()).then((names) => {
+  for (const n of names) {
+    const b = document.createElement("button");
+    b.textContent = n.startsWith("images/") ? n.slice(7).replace(/\.\w+$/, "") + "(圖片)" : n.replace(/\.dxf$/, "");
+    b.onclick = () => { const f = new FormData(); f.append("sample", n); run(f); };
+    $("samples").appendChild(b);
+  }
+});
+</script>
+</body>
+</html>

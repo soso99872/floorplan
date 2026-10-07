@@ -1,0 +1,6 @@
+cadquery==2.4.0
+ezdxf==1.1.4
+matplotlib==3.7.5
+shapely==2.0.7
+Flask==3.0.3
+opencv-python-headless==5.0.0.93
