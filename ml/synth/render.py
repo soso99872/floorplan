@@ -18,7 +18,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+from dataclasses import replace
+
 from shapely.geometry import Polygon, box
+from shapely.ops import unary_union
 
 from .plans import Plan, opening_frame
 
@@ -137,6 +140,9 @@ def sample_style(plan: Plan):
         "dims": random.random() < 0.55,
         "grid": random.random() < 0.15,
         "extras": random.random() < 0.4,
+        "thin_inner": random.random() < 0.35,  # 內部隔間牆比外牆細(真實圖很常見)
+        "patches": random.random() < 0.5,  # 斜線 / 填色的非牆區塊:樓梯、設備、浴室地坪
+        "outside": random.random() < 0.35,  # 屋外的露台磁磚、欄杆雙線
         "hand": random.random() < 0.12,
         "scan": random.random() < 0.3,
         "blur": random.random() < 0.3,
@@ -423,6 +429,82 @@ def draw_balcony_rail(img, cv, plan, st):
         if random.random() < 0.6:
             edge = b.buffer(-30)
             outline(img, cv, edge, tint(st["ink"], 40), 1)
+            if random.random() < 0.5:  # 欄杆畫成雙線
+                outline(img, cv, b.buffer(-30 - random.uniform(40, 120)), tint(st["ink"], 40), 1)
+
+
+def thin_inner_walls(plan: Plan):
+    """內部隔間牆變細:外牆那一圈不動,其餘的牆從兩側各削掉一些(標註跟著改)。"""
+    outer = unary_union([plan.walls] + [r for _, r in plan.rooms] + plan.doors + plan.windows).buffer(5)
+    band = outer.boundary.buffer(plan.wall_mm * 1.1)
+    d = plan.wall_mm * random.uniform(0.18, 0.33)
+    ext = plan.walls.intersection(band)
+    inner = plan.walls.difference(band)
+    thin = inner.buffer(-d, join_style=2)
+    stub = plan.walls.intersection(band.buffer(d + 5).difference(band))  # 接到外牆的地方補一小段,免得斷開
+    walls = unary_union([ext, thin, stub]).buffer(0)
+    return replace(plan, walls=walls) if not walls.is_empty else plan
+
+
+def draw_patches(img, cv, plan, st):
+    """不是牆、但看起來很像的東西:斜線區(樓梯、設備、浴室地坪)、深色色塊(流理台、櫃子)。"""
+    ink = tint(st["ink"], 30)
+    for kind, poly in plan.rooms:
+        if random.random() > 0.35:
+            continue
+        w, d = random.uniform(600, 2500), random.uniform(500, 1800)
+        r = place_rect(poly, w, d)
+        if r is None:
+            continue
+        mode = random.choice(["hatch", "stair", "dark", "cross", "gray"])
+        if mode in ("hatch", "cross"):
+            mask = np.zeros(img.shape[:2], np.uint8)
+            fill(mask, cv, r, 255)
+            hatch(img, mask, ink, random.uniform(3, 9), random.choice([45, 135, 0, 90]), 1, cross=mode == "cross")
+            outline(img, cv, r, ink, random.choice([1, 2]))
+        elif mode == "stair":
+            x0, y0, x1, y1 = r.bounds
+            outline(img, cv, r, ink, 1)
+            for k in np.linspace(y0, y1, random.randint(6, 14)):
+                line(img, cv.pt(x0, k), cv.pt(x1, k), ink, 1)
+            line(img, cv.pt((x0 + x1) / 2, y0), cv.pt((x0 + x1) / 2, y1), ink, 1)
+        elif mode == "dark":
+            fill(img, cv, r, rnd_gray(20, 90))
+        else:
+            fill(img, cv, r, rnd_gray(140, 200))
+            outline(img, cv, r, ink, 1)
+
+
+def draw_outside(img, cv, plan, st):
+    """屋外:露台磁磚格線、欄杆雙線、地界線。"""
+    ink = tint(st["ink"], 40)
+    x0, y0, x1, y1 = plan.walls.bounds
+    side = random.choice(["top", "bottom", "left", "right"])
+    depth = random.uniform(1200, 3000)
+    r = {"top": box(x0, y1, x1, y1 + depth), "bottom": box(x0, y0 - depth, x1, y0),
+         "left": box(x0 - depth, y0, x0, y1), "right": box(x1, y0, x1 + depth, y1)}[side]
+    r = r.intersection(box(*cv_bounds(cv)))
+    if r.is_empty:
+        return
+    mask = np.zeros(img.shape[:2], np.uint8)
+    fill(mask, cv, r, 255)
+    if random.random() < 0.6:
+        hatch(img, mask, ink, max(4, random.uniform(300, 600) * cv.s), 0, 1, cross=True)
+    outline(img, cv, r, ink, 1)
+    outline(img, cv, r.buffer(-random.uniform(40, 100)), ink, 1)
+
+
+def cv_bounds(cv):
+    """畫布範圍(mm)。"""
+    x0 = cv.x0 - cv.m / cv.s
+    x1 = cv.x0 + (cv.w - cv.m) / cv.s
+    if cv.flip:
+        y1 = cv.y1 + cv.m / cv.s
+        y0 = cv.y1 - (cv.h - cv.m) / cv.s
+    else:
+        y0 = cv.y0 - cv.m / cv.s
+        y1 = cv.y0 + (cv.h - cv.m) / cv.s
+    return x0, y0, x1, y1
 
 
 # ---------- 畫質 ----------
@@ -471,6 +553,11 @@ def render(plan: Plan, seed=None, style=None):
         random.seed(seed)
         np.random.seed(seed % (2 ** 32))
     st = style or sample_style(plan)
+    if st.get("thin_inner"):
+        try:
+            plan = thin_inner_walls(plan)
+        except Exception:  # 幾何運算失敗就維持原樣
+            pass
     cv = Canvas(plan, st["px_per_mm"], random.randint(30, 120), random.random() < 0.5)
     img = np.full((cv.h, cv.w, 3), st["paper"], np.uint8)
     label = np.zeros((cv.h, cv.w), np.uint8)
@@ -478,7 +565,11 @@ def render(plan: Plan, seed=None, style=None):
     draw_floor(img, cv, plan, st)
     if st["grid"]:
         draw_grid(img, cv, plan)
+    if st.get("outside"):
+        draw_outside(img, cv, plan, st)
     draw_furniture(img, cv, plan, st)
+    if st.get("patches"):
+        draw_patches(img, cv, plan, st)
     draw_balcony_rail(img, cv, plan, st)
     draw_walls(img, cv, plan, st)
     draw_windows(img, cv, plan, st)

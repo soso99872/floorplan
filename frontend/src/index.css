@@ -139,6 +139,10 @@ details .log { margin-top: 6px; }
 .export-menu .menu button:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .export-menu .menu span { color: var(--muted); font-size: 12px; }
 
+.credits { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.7; }
+.credits a { color: var(--accent); }
+.field select { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 6px; padding: 3px 6px; }
+
 /* 分享 */
 .dialog.wide { width: min(620px, 94vw); max-height: 88vh; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
 .dialog h2.sub { font-size: 13px; color: var(--muted); margin: 6px 0 0; }

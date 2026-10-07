@@ -59,6 +59,7 @@ export default function App() {
   const [caps, setCaps] = useState({ dwg: false, ml: false })
   const [engine, setEngine] = useState<Engine>('auto')
   const [sharing, setSharing] = useState(false)
+  const [about, setAbout] = useState(false)
   const [doorsOpen, setDoorsOpen] = useState(false)
   const [doorCount, setDoorCount] = useState(0)
   const [dragOver, setDragOver] = useState(false)
@@ -204,6 +205,7 @@ export default function App() {
         <h1>平面圖 → 3D 空間</h1>
         <span className="sub">圖片或 AutoCAD 平面圖 → 可編輯的 3D 空間</span>
         <span className="spacer" />
+        <button onClick={() => setAbout(true)}>關於</button>
         <button onClick={() => projectInput.current?.click()}>開啟專案</button>
         <input ref={projectInput} type="file" accept=".json" hidden
           onChange={(e) => { const f = e.target.files?.[0]; if (f) openProject(f); e.target.value = '' }} />
@@ -430,6 +432,24 @@ export default function App() {
         )}
       </main>
 
+      {about && (
+        <div className="modal" onClick={() => setAbout(false)}>
+          <div className="dialog wide" onClick={(e) => e.stopPropagation()}>
+            <h2>關於</h2>
+            <p>平面圖 → 3D 空間:上傳平面圖圖片或 AutoCAD 檔,辨識牆、門窗、房間、家具,編輯後產生 3D 與各種匯出。</p>
+            <h2 className="sub">資料來源與授權</h2>
+            <ul className="credits">
+              <li>
+                圖片辨識的機器學習模型以 <a href="https://github.com/m-agour/ResPlan" target="_blank" rel="noreferrer">ResPlan</a> 資料集
+                (住宅格局向量,<a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noreferrer">CC BY 4.0</a>)
+                的格局幾何,自行渲染成合成訓練資料。
+              </li>
+              <li>3D 引擎 three.js(MIT)、DXF 讀寫 ezdxf(MIT)、影像處理 OpenCV(Apache 2.0)。</li>
+            </ul>
+            <div className="row right"><button onClick={() => setAbout(false)}>關閉</button></div>
+          </div>
+        </div>
+      )}
       {sharing && scene && <ShareDialog scene={scene} name={name} onClose={() => setSharing(false)} />}
       {measure && (
         <div className="modal" onClick={() => setMeasure(null)}>

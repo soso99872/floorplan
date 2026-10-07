@@ -24,7 +24,8 @@ def test_labels_align_with_solid_walls(plans):
         random.seed(i)
         st = sample_style(plan)
         st.update(wall="solid", ink=(0, 0, 0), floor="none", furniture="none", text=False, dims=False, grid=False,
-                  extras=False, hand=False, scan=False, blur=False, jpeg=False, rotate=False, lowres=False)
+                  extras=False, hand=False, scan=False, blur=False, jpeg=False, rotate=False, lowres=False,
+                  patches=False, outside=False, thin_inner=(i % 2 == 0))
         img, lab, _ = render(plan, seed=i, style=st)
         gray = img.mean(axis=2)
         walls = lab == WALL
