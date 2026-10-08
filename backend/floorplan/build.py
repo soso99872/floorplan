@@ -138,13 +138,13 @@ class Frame:
         return (round(float(p[0]) * self.mm_per_px, 1), round(float(self.img_h - p[1]) * self.mm_per_px, 1))
 
 
-def make_walls(clean, t, mm_per_px, openings, wall_height, log):
+def make_walls(clean, t, mm_per_px, openings, wall_height, log, t_max=None):
     """開口填回牆裡再規整一次:牆段會連續穿過門窗。回傳 (像素牆段, Scene 牆段, 換算)。"""
     filled = clean.copy()
     for o in openings:
         x, y, w, h = o["rect"]
         filled[y:y + h, x:x + w] = 255
-    rects, leftovers, _ = rz.regularize_walls(filled, t)
+    rects, leftovers, _ = rz.regularize_walls(filled, t, t_max)
     walls_px = [rect_to_segment(*r) for r in rects] + [poly_to_segment(p) for p in leftovers]
     to_mm = Frame(mm_per_px, clean.shape[0])
     scene_walls = [
@@ -246,6 +246,16 @@ def outer_of(rect, wall_box, t):
     return x - x0 < 2 * t or x1 - (x + w) < 2 * t
 
 
+def ridge_thickness(mask, q=50):
+    """牆厚 = 牆中心線上「到牆邊距離」的中位數 × 2。
+    比「最常見的連續長度」穩:模型的牆遮罩裡沒有文字筆畫,但牆有粗有細,眾數容易被細牆或雜點帶偏。"""
+    dist = cv2.distanceTransform((mask > 0).astype(np.uint8), cv2.DIST_L2, 5)
+    ridge = (dist >= cv2.dilate(dist, np.ones((3, 3), np.uint8))) & (dist >= 1.5)
+    if not ridge.any():
+        return rz.wall_thickness(mask)
+    return max(3, int(round(2 * float(np.percentile(dist[ridge], q)))))
+
+
 def ml_walls(im):
     """模型的分割結果(縮放回原圖大小)→ 牆遮罩、牆厚、分割圖。"""
     seg, scale = ml.segment(im)
@@ -255,12 +265,12 @@ def ml_walls(im):
     n, lab, st, _ = cv2.connectedComponentsWithStats(raw)
     if n <= 1:
         raise rz.PlanError("找不到牆(機器學習)")
-    t = rz.wall_thickness(raw)
+    t = ridge_thickness(raw)
     keep = np.zeros_like(raw)  # 去掉零星的小誤判
     for i in range(1, n):
         if max(st[i, 2], st[i, 3]) >= 4 * t:
             keep[lab == i] = 255
-    return keep, t, seg
+    return keep, t, seg, ridge_thickness(keep, 95)
 
 
 def ml_openings(seg, clean, t, wall_box, mm_per_px, value):
@@ -299,13 +309,13 @@ def build_scene(src, width_mm=DEFAULT_WIDTH_MM, wall_height=DEFAULT_WALL_HEIGHT,
     if engine == "ml":
         if not ml.available():
             raise rz.PlanError("機器學習模型不存在(backend/models/floorplan-seg.onnx),請改用規則辨識")
-        raw, t, seg = ml_walls(im)
+        raw, t, seg, t_max = ml_walls(im)
         log.append("[辨識方式] 機器學習模型")
     else:
         raw, t = rz.wall_mask(im)
-        seg = None
+        seg, t_max = None, None
         log.append("[辨識方式] 規則(深色粗線)")
-    rects, leftovers, clean = rz.regularize_walls(raw, t)
+    rects, leftovers, clean = rz.regularize_walls(raw, t, t_max)
     ys, xs = np.nonzero(clean)
     wall_box = (xs.min(), ys.min(), xs.max() + 1, ys.max() + 1)
     width_px = wall_box[2] - wall_box[0]
@@ -323,7 +333,7 @@ def build_scene(src, width_mm=DEFAULT_WIDTH_MM, wall_height=DEFAULT_WALL_HEIGHT,
         openings = ml_openings(seg, clean, t, wall_box, mm_per_px, value)
     else:
         openings = rz.classify(rz.find_openings(clean, t, 1 / mm_per_px), wall_box, t, value)
-    walls_px, scene_walls, to_mm = make_walls(clean, t, mm_per_px, openings, wall_height, log)
+    walls_px, scene_walls, to_mm = make_walls(clean, t, mm_per_px, openings, wall_height, log, t_max)
     scene_openings, wall_dist = make_openings(openings, walls_px, scene_walls, clean, mm_per_px, log)
 
     lab = rz.image_lab(im)

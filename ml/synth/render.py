@@ -187,7 +187,8 @@ def draw_walls(img, cv, plan, st):
         fill(img, cv, walls, ink)
     elif kind == "solid_gray":
         fill(img, cv, walls, rnd_gray(70, 150))
-        if random.random() < 0.5:
+        st["_outlined"] = random.random() < 0.5
+        if st["_outlined"]:
             outline(img, cv, walls, ink, t)
     elif kind == "solid_color":
         fill(img, cv, walls, st["wall_color"])
@@ -579,7 +580,10 @@ def render(plan: Plan, seed=None, style=None):
     if st["dims"]:
         draw_dims(img, cv, plan, st)
 
-    fill(label, cv, plan.walls, WALL)
+    # 有畫外框線的牆,線本身(以邊界為中心,一半在牆外)也算牆;真實圖的標註習慣是含外框線的
+    outlined = st["wall"] in ("double", "hatch", "cross", "gray_fill") or (st["wall"] == "solid_gray" and st.get("_outlined"))
+    pad = st["line_t"] / 2 / cv.s if outlined else 0
+    fill(label, cv, plan.walls.buffer(pad, join_style=2) if pad else plan.walls, WALL)
     for d in plan.doors:
         fill(label, cv, d, DOOR)
     for wdw in plan.windows:

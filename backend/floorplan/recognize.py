@@ -357,10 +357,15 @@ def detect_furniture(im, lab, labels, room_ids, t, mm_per_px):
 
 # ---------- 牆體規整化 ----------
 
-def _bands(mask, t, horizontal):
+MAX_WALL_RATIO = 2.5  # 牆段的厚度最多是主要牆厚的幾倍
+
+
+def _bands(mask, t, horizontal, t_max=None):
     """找出水平(或垂直)走向的牆段,每段用「中位數」決定上下緣,不受邊緣毛刺影響。
-    回傳 [along0, along1, across0, across1](像素)。"""
-    L = 3 * t
+    回傳 [along0, along1, across0, across1](像素)。
+    t_max = 最粗的牆厚:判斷走向的長度要比它長,不然粗的直牆也會被當成橫牆,跟上下的橫牆連成一大塊。"""
+    L = max(3 * t, int(1.3 * t_max)) if t_max else 3 * t
+    max_thick = 1.5 * t_max if t_max else MAX_WALL_RATIO * t
     kernel = np.ones((1, L) if horizontal else (L, 1), np.uint8)
     m = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
     if not horizontal:
@@ -375,7 +380,10 @@ def _bands(mask, t, horizontal):
         cols = comp.any(axis=0)
         top = np.argmax(comp, axis=0)[cols]
         bot = h - np.argmax(comp[::-1], axis=0)[cols]
-        bands.append([float(x), float(x + w), y + float(np.median(top)), y + float(np.median(bot))])
+        band = [float(x), float(x + w), y + float(np.median(top)), y + float(np.median(bot))]
+        # 比牆厚粗很多的「牆段」其實是一疊橫線(樓梯、磁磚格線、斜線填充)連成的一大塊,不是牆
+        if band[3] - band[2] <= max_thick:
+            bands.append(band)
     return bands
 
 
@@ -414,13 +422,13 @@ def _snap_ends(bands, cross, t):
     return bands
 
 
-def regularize_walls(mask, t):
+def regularize_walls(mask, t, t_max=None):
     """把從圖片描出來、邊緣有毛刺的牆,換成乾淨的直角矩形。
 
     回傳 (rects, leftovers, clean_mask):rects 是 (x0, y0, x1, y1) 像素座標的矩形;
     leftovers 是斜牆、短牆頭等矩形表示不了的部分(輪廓點);clean_mask 是規整後的牆。"""
-    h_bands = _align(_bands(mask, t, True), t)
-    v_bands = _align(_bands(mask, t, False), t)
+    h_bands = _align(_bands(mask, t, True, t_max), t)
+    v_bands = _align(_bands(mask, t, False, t_max), t)
     h_bands = _snap_ends(h_bands, v_bands, t)
     v_bands = _snap_ends(v_bands, h_bands, t)
     rects = [(b[0], b[2], b[1], b[3]) for b in h_bands] + [(b[2], b[0], b[3], b[1]) for b in v_bands]
@@ -434,7 +442,7 @@ def regularize_walls(mask, t):
     n, lab, st, _ = cv2.connectedComponentsWithStats(rest)
     for i in range(1, n):
         x, y, w, h, area = st[i]
-        if max(w, h) >= 2 * t and area / max(w, h) >= 0.5 * t:
+        if max(w, h) >= 2 * t and 0.5 * t <= area / max(w, h) <= (1.5 * t_max if t_max else MAX_WALL_RATIO * t):
             comp = (lab == i).astype(np.uint8)
             cnts, _ = cv2.findContours(comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             cnt = max(cnts, key=cv2.contourArea)

@@ -40,8 +40,8 @@ def main():
         tol = max(2, int(round(gt["thickness"] / 2)))
         im = rz.load_image(row["image"]["bytes"])
         try:
-            raw, t, seg = ml_walls(im)
-            _, _, clean = rz.regularize_walls(raw, t)
+            raw, t, seg, t_max = ml_walls(im)
+            _, _, clean = rz.regularize_walls(raw, t, t_max)
             final = ev.prediction(row, "ml")["walls"]
         except Exception as e:
             print(f"[{k + 1}] 失敗 {e}")
