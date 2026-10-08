@@ -1,0 +1,23 @@
+{
+ "classes": [
+  "背景",
+  "牆",
+  "門",
+  "窗"
+ ],
+ "version": "v1",
+ "epoch": 7,
+ "val_iou": [
+  0.993215870932243,
+  0.9559328027215447,
+  0.7925209677758392,
+  0.8812792309024771
+ ],
+ "real_eval": {
+  "wall_iou": 0.542,
+  "wall_precision": 0.77,
+  "wall_recall": 0.929,
+  "opening_precision": 0.511,
+  "opening_recall": 0.802
+ }
+}

@@ -93,3 +93,15 @@ def test_api_rejects_bad_input():
     assert client.post("/api/recognize", files={"file": ("x.txt", b"hello")}).status_code == 415
     assert client.post("/api/recognize", files={"file": ("x.png", b"not an image")}).status_code == 422
     assert client.post("/api/recognize", data={"sample": "floorplan.png", "width": "-5"}).status_code == 422
+
+
+@pytest.mark.skipif(not __import__("floorplan.ml", fromlist=["available"]).available(), reason="沒有 ML 模型")
+def test_ml_engine():
+    """機器學習辨識:範例圖也要得到合理的牆、門窗、房間。"""
+    r = build_scene(SAMPLE, 12000, 3000, with_background=False, engine="ml")
+    s = r.scene
+    assert any("機器學習" in line for line in r.log)
+    assert 8 <= len(s.walls) <= 30
+    kinds = [o.kind for o in s.openings]
+    assert kinds.count("window") >= 6 and kinds.count("door") + kinds.count("passage") >= 6
+    assert len(s.rooms) >= 6

@@ -61,6 +61,7 @@ def main():
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--threads", type=int, default=12)
     ap.add_argument("--val", type=int, default=400, help="驗證用幾塊")
+    ap.add_argument("--init", help="從這個檢查點的權重開始(微調用),例如 runs/v1/best.pt")
     a = ap.parse_args()
     torch.set_num_threads(a.threads)
     run = Path("runs") / a.name
@@ -75,7 +76,9 @@ def main():
     train = DataLoader(Tiles(a.data, "train", a.size), batch_size=a.batch, shuffle=True, num_workers=a.workers,
                        drop_last=True, persistent_workers=a.workers > 0)
     val = DataLoader(Tiles(a.data, "val", a.size, augment=False, limit=a.val), batch_size=a.batch, num_workers=a.workers)
-    model = UNet()
+    model = UNet(pretrained=not a.init)
+    if a.init and not (run / "last.pt").exists():
+        model.load_state_dict(torch.load(a.init, map_location="cpu", weights_only=True)["model"])
     enc = [p for n, p in model.named_parameters() if n.split(".")[0] in ("stem", "l1", "l2", "l3", "l4")]
     dec = [p for n, p in model.named_parameters() if n.split(".")[0] not in ("stem", "l1", "l2", "l3", "l4")]
     opt = torch.optim.AdamW([{"params": enc, "lr": a.lr * 0.3}, {"params": dec, "lr": a.lr}], weight_decay=1e-4)
