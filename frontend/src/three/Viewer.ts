@@ -16,6 +16,8 @@ const VIEW_DIRS: Record<ViewName, [number, number, number]> = {
   right: [1, 0, 0],
 }
 const OPEN_DEG = 80
+const CUT_HEIGHT = 1200 // 剖切牆的高度 mm
+const DOOR_REACH = 1800 // 走動時按 E 能開的門的距離
 const EYE_HEIGHT = 1600 // 第一人稱的眼睛高度 mm
 const WALK_SPEED = 1400 // mm/s,按住 Shift 加快
 const BODY_RADIUS = 220 // 走動時離牆至少這麼遠
@@ -29,6 +31,8 @@ interface Walk {
   keys: Set<string>
   /** 滑鼠曾經鎖定成功過 */
   locked: boolean
+  /** 觸控搖桿的方向(-1~1),沒在推就是 null */
+  stick: [number, number] | null
   saved: { pos: THREE.Vector3; target: THREE.Vector3; up: THREE.Vector3 }
 }
 
@@ -49,6 +53,20 @@ export class Viewer {
   private autoView: ViewName | null = null
   private showPlan = false
   private showCeiling = false
+  private hemi = new THREE.HemisphereLight(0xffffff, 0x445066, 0.45)
+  private headlight = new THREE.DirectionalLight(0xffffff, 0.6)
+  private sunHour = 15
+  private night = false
+  private cut = false
+  private nightLights = new THREE.Group()
+  private fly: { from: THREE.Vector3; to: THREE.Vector3; tFrom: THREE.Vector3; tTo: THREE.Vector3; t: number } | null = null
+  private dragF: { id: string; off: [number, number]; sx: number; sy: number; moved: boolean } | null = null
+  private lastTouch: [number, number] | null = null
+  private stickEl: HTMLDivElement | null = null
+  /** 在 3D 裡拖家具:done = 放開滑鼠 */
+  onFurnitureDrag: ((id: string, x: number, y: number, done: boolean) => void) | null = null
+  /** 在 3D 裡點一下家具(選取) */
+  onFurnitureClick: ((id: string) => void) | null = null
   private walk: Walk | null = null
   private lastFrame = performance.now()
   /** 門的狀態改變時通知外面(更新按鈕文字) */
@@ -77,15 +95,14 @@ export class Viewer {
     this.controls.enableDamping = true
     this.controls.addEventListener('start', () => { this.autoView = null })
 
-    this.scene3d.add(new THREE.HemisphereLight(0xffffff, 0x445066, 0.45))
+    this.scene3d.add(this.hemi, this.nightLights)
     this.sun.intensity = 2.4
     this.sun.castShadow = true
     this.sun.shadow.mapSize.set(2048, 2048)
     this.sun.shadow.normalBias = 12
     this.sun.shadow.bias = -0.0002
     this.scene3d.add(this.sun, this.sun.target)
-    const headlight = new THREE.DirectionalLight(0xffffff, 0.6)
-    this.camera.add(headlight)
+    this.camera.add(this.headlight)
     this.scene3d.add(this.camera)
 
     this.resizeObserver = new ResizeObserver(() => this.resize())
@@ -98,7 +115,10 @@ export class Viewer {
       const dt = Math.min(0.1, (now - this.lastFrame) / 1000)
       this.lastFrame = now
       if (this.walk) this.stepWalk(dt)
-      else this.controls.update()
+      else {
+        if (this.fly) this.stepFly(dt)
+        this.controls.update()
+      }
       this.animateDoors()
       this.renderer.render(this.scene3d, this.camera)
     })
@@ -145,7 +165,7 @@ export class Viewer {
       this.scene3d.add(this.floor)
     }
     this.built.ceilings.visible = this.showCeiling || !!this.walk
-    this.fitSun()
+    this.applyLighting()
     this.applyMaterialMode()
     if (this.walk) return this.onDoorsChange?.()
     if (!keepView || first) this.setView('iso')
@@ -158,8 +178,13 @@ export class Viewer {
     const b = this.built.bounds
     const c = b.getCenter(new THREE.Vector3())
     const r = b.getSize(new THREE.Vector3()).length() / 2
-    // 陽光從等角視角的另一側斜照進來,牆和家具的影子才會落在看得到的那一側
-    this.sun.position.copy(c).add(new THREE.Vector3(-1.2, 1.6, 2.2).normalize().multiplyScalar(r * 3))
+    // 日照時間:6 點從東邊(+x)升起、18 點落到西邊;下午三點左右的影子落在等角視角看得到的那一側
+    const th = (Math.PI * (Math.min(18.5, Math.max(5.5, this.sunHour)) - 6)) / 12
+    const elev = Math.max(0.05, Math.sin(th))
+    const dir = new THREE.Vector3(Math.cos(th), Math.sin(th) * 0.8 + 0.6, elev * 1.6 + 0.25).normalize()
+    this.sun.position.copy(c).add(dir.multiplyScalar(r * 3))
+    this.sun.color.setRGB(1, 0.75 + 0.25 * elev, 0.5 + 0.5 * elev) // 太陽低的時候偏暖
+    this.sun.intensity = this.night ? 0 : 0.6 + 1.8 * elev
     this.sun.target.position.copy(c)
     const cam = this.sun.shadow.camera
     cam.left = cam.bottom = -r * 1.1
@@ -169,8 +194,58 @@ export class Viewer {
     cam.updateProjectionMatrix()
   }
 
+  /** 夜景:關掉陽光、環境光調暗,每個房間天花板下放一盞暖色燈 */
+  private applyLighting() {
+    this.nightLights.clear()
+    const env = this.night ? 0.06 : 0.4
+    this.scene3d.environmentIntensity = env
+    this.hemi.intensity = this.night ? 0.06 : 0.45
+    this.headlight.intensity = this.night ? 0.05 : 0.6
+    this.renderer.toneMappingExposure = this.night ? 1.25 : 0.9
+    this.scene3d.background = new THREE.Color(this.night ? '#0b1020' : '#20252e')
+    if (this.night && this.built) {
+      const h = this.built.bounds.max.z
+      for (const r of this.built.rooms) {
+        const lamp = new THREE.PointLight(0xffd8a8, 0, 0, 2)
+        const size = Math.sqrt(r.area) * 1000
+        lamp.intensity = 2.2e6 * Math.max(1, r.area / 12) // 依房間大小調亮度(單位是 mm)
+        lamp.distance = size * 2.5
+        lamp.position.set(r.center[0], r.center[1], h - 250)
+        this.nightLights.add(lamp)
+      }
+    }
+    this.fitSun()
+  }
+
+  /** 鏡頭飛到某個房間上方斜看 */
+  flyToRoom(poly: Point[]) {
+    if (!this.built || this.walk || poly.length < 3) return
+    const box = new THREE.Box2().setFromPoints(poly.map(([x, y]) => new THREE.Vector2(x, y)))
+    const c = box.getCenter(new THREE.Vector2())
+    const size = box.getSize(new THREE.Vector2()).length()
+    const target = new THREE.Vector3(c.x, c.y, 600)
+    // 和 setView 一樣依比較窄的視野決定距離(並排時畫面是直的);角度偏俯視,牆才不會擋住房間
+    const halfV = THREE.MathUtils.degToRad(this.camera.fov / 2)
+    const half = Math.min(halfV, Math.atan(Math.tan(halfV) * this.camera.aspect))
+    const dist = Math.max((size / 2 / Math.sin(half)) * 1.1, 4500)
+    const pos = target.clone().add(new THREE.Vector3(0.3, -0.7, 1.6).normalize().multiplyScalar(dist))
+    this.fly = { from: this.camera.position.clone(), to: pos, tFrom: this.controls.target.clone(), tTo: target, t: 0 }
+    this.camera.up.set(0, 0, 1)
+    this.autoView = null
+  }
+
+  private stepFly(dt: number) {
+    const f = this.fly!
+    f.t = Math.min(1, f.t + dt / 0.7)
+    const e = f.t * f.t * (3 - 2 * f.t)
+    this.camera.position.lerpVectors(f.from, f.to, e)
+    this.controls.target.lerpVectors(f.tFrom, f.tTo, e)
+    if (f.t >= 1) this.fly = null
+  }
+
   setView(name: ViewName) {
     if (!this.built || this.walk) return
+    this.fly = null
     this.autoView = name
     const b = this.built.bounds
     const c = b.getCenter(new THREE.Vector3())
@@ -195,7 +270,18 @@ export class Viewer {
     this.controls.update()
   }
 
-  setDisplay(opt: { wire?: boolean; xray?: boolean; furniture?: boolean; plan?: boolean; ceiling?: boolean }) {
+  setDisplay(opt: { wire?: boolean; xray?: boolean; furniture?: boolean; plan?: boolean; ceiling?: boolean;
+    cut?: boolean; night?: boolean; sunHour?: number }) {
+    if (opt.cut !== undefined) {
+      this.cut = opt.cut
+      // 剖切:把 1.2 m 以上的東西切掉,從上面看得到房間裡面
+      this.renderer.clippingPlanes = this.cut ? [new THREE.Plane(new THREE.Vector3(0, 0, -1), CUT_HEIGHT)] : []
+    }
+    if (opt.sunHour !== undefined) this.sunHour = opt.sunHour
+    if (opt.night !== undefined || opt.sunHour !== undefined) {
+      if (opt.night !== undefined) this.night = opt.night
+      this.applyLighting()
+    }
     if (opt.wire !== undefined) this.wire = opt.wire
     if (opt.xray !== undefined) this.xray = opt.xray
     if (opt.plan !== undefined) this.showPlan = opt.plan
@@ -247,6 +333,14 @@ export class Viewer {
     }
   }
 
+  /** 滑鼠位置投到地板(z = 0)上的點 */
+  private floorPoint(e: PointerEvent): THREE.Vector3 | null {
+    const rect = this.renderer.domElement.getBoundingClientRect()
+    const ndc = new THREE.Vector2(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1)
+    this.raycaster.setFromCamera(ndc, this.camera)
+    return this.raycaster.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), 0), new THREE.Vector3())
+  }
+
   private pick(e: PointerEvent): THREE.Intersection | undefined {
     if (!this.built) return undefined
     const rect = this.renderer.domElement.getBoundingClientRect()
@@ -257,18 +351,45 @@ export class Viewer {
 
   private bindPointer() {
     const el = this.renderer.domElement
-    el.addEventListener('pointerdown', (e) => { this.downAt = [e.clientX, e.clientY] })
+    el.addEventListener('pointerdown', (e) => {
+      this.downAt = [e.clientX, e.clientY]
+      if (this.walk || e.button !== 0) return
+      const hit = this.pick(e)
+      const fg = hit && furnitureOf(hit.object)
+      const p = fg && this.floorPoint(e)
+      if (fg && p) { // 按在家具上:拖家具,不轉鏡頭
+        this.dragF = { id: fg.userData.furnitureId, off: [fg.position.x - p.x, fg.position.y - p.y], sx: e.clientX, sy: e.clientY, moved: false }
+        this.controls.enabled = false
+      }
+    })
     // 點一下門片只開關那一扇;拖曳旋轉視角時不觸發
     el.addEventListener('pointerup', (e) => {
+      const d = this.dragF
+      if (d) {
+        this.dragF = null
+        this.controls.enabled = !this.walk
+        const p = this.floorPoint(e)
+        if (d.moved && p) this.onFurnitureDrag?.(d.id, p.x + d.off[0], p.y + d.off[1], true)
+        else if (!d.moved) this.onFurnitureClick?.(d.id)
+        return
+      }
       if (!this.downAt || Math.hypot(e.clientX - this.downAt[0], e.clientY - this.downAt[1]) > 4) return
       const hit = this.pick(e)
       const door = hit && doorOfMesh.get(hit.object)
       if (door) { door.open = !door.open; this.onDoorsChange?.() }
     })
     el.addEventListener('pointermove', (e) => {
-      if (e.buttons || !this.doors.length) return
+      const d = this.dragF
+      if (d) {
+        if (!d.moved && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) < 4) return
+        d.moved = true
+        const p = this.floorPoint(e)
+        if (p) this.onFurnitureDrag?.(d.id, p.x + d.off[0], p.y + d.off[1], false)
+        return
+      }
+      if (e.buttons || this.walk) return
       const hit = this.pick(e)
-      el.style.cursor = hit && doorOfMesh.has(hit.object) ? 'pointer' : ''
+      el.style.cursor = hit && doorOfMesh.has(hit.object) ? 'pointer' : hit && furnitureOf(hit.object) ? 'move' : ''
     })
   }
 
@@ -356,7 +477,7 @@ export class Viewer {
     const b = this.built.bounds
     const start = this.built.walkStart ?? [(b.min.x + b.max.x) / 2, (b.min.y + b.max.y) / 2]
     this.walk = {
-      pos: [start[0], start[1]], yaw: Math.PI / 2, pitch: -0.08, keys: new Set(), locked: false,
+      pos: [start[0], start[1]], yaw: Math.PI / 2, pitch: -0.08, keys: new Set(), locked: false, stick: null,
       saved: { pos: this.camera.position.clone(), target: this.controls.target.clone(), up: this.camera.up.clone() },
     }
     this.controls.enabled = false
@@ -366,7 +487,8 @@ export class Viewer {
     this.camera.updateProjectionMatrix()
     this.built.ceilings.visible = true
     this.applyMaterialMode()
-    this.renderer.domElement.requestPointerLock?.()
+    if (TOUCH) this.showStick()
+    else this.renderer.domElement.requestPointerLock?.()
     this.stepWalk(0)
     this.onWalkChange?.(true)
   }
@@ -375,6 +497,8 @@ export class Viewer {
     const w = this.walk
     if (!w) return
     this.walk = null
+    this.stickEl?.remove()
+    this.stickEl = null
     if (document.pointerLockElement === this.renderer.domElement) document.exitPointerLock()
     this.controls.enabled = true
     this.camera.up.copy(w.saved.up)
@@ -399,6 +523,7 @@ export class Viewer {
     window.addEventListener('keydown', (e) => {
       if (!this.walk) return
       if (e.code === 'Escape') { this.stopWalk(); return }
+      if (e.code === 'KeyE') { this.toggleNearestDoor(); return }
       if (keys.includes(e.code)) { this.walk.keys.add(e.code); e.preventDefault() }
     })
     window.addEventListener('keyup', (e) => this.walk?.keys.delete(e.code))
@@ -408,8 +533,14 @@ export class Viewer {
     })
     // 沒有鎖定滑鼠時(瀏覽器不允許或按過 Esc 一次),按住左鍵拖曳也可以看
     el.addEventListener('pointermove', (e) => {
-      if (this.walk && document.pointerLockElement !== el && e.buttons === 1) this.look(e.movementX, e.movementY)
+      if (!this.walk || document.pointerLockElement === el || e.buttons !== 1) return
+      // 觸控的 movementX 不一定有值,自己算位移
+      const last = this.lastTouch ?? [e.clientX, e.clientY]
+      this.look((e.clientX - last[0]) * (e.pointerType === 'touch' ? 2 : 1), (e.clientY - last[1]) * (e.pointerType === 'touch' ? 2 : 1))
+      this.lastTouch = [e.clientX, e.clientY]
     })
+    el.addEventListener('pointerdown', (e) => { this.lastTouch = [e.clientX, e.clientY] })
+    el.addEventListener('pointerup', () => { this.lastTouch = null })
     // 鎖定滑鼠時按 Esc 會被瀏覽器拿去解除鎖定、頁面收不到按鍵,所以解除鎖定就等於離開
     document.addEventListener('pointerlockchange', () => {
       if (!this.walk) return
@@ -421,10 +552,12 @@ export class Viewer {
   private stepWalk(dt: number) {
     const w = this.walk!
     const k = w.keys
-    const f = (k.has('KeyW') || k.has('ArrowUp') ? 1 : 0) - (k.has('KeyS') || k.has('ArrowDown') ? 1 : 0)
-    const s = (k.has('KeyD') || k.has('ArrowRight') ? 1 : 0) - (k.has('KeyA') || k.has('ArrowLeft') ? 1 : 0)
+    let f = (k.has('KeyW') || k.has('ArrowUp') ? 1 : 0) - (k.has('KeyS') || k.has('ArrowDown') ? 1 : 0)
+    let s = (k.has('KeyD') || k.has('ArrowRight') ? 1 : 0) - (k.has('KeyA') || k.has('ArrowLeft') ? 1 : 0)
+    if (w.stick && Math.hypot(...w.stick) > 0.15) { f = -w.stick[1]; s = w.stick[0] }
     if (f || s) {
-      const speed = (k.has('ShiftLeft') || k.has('ShiftRight') ? 2.2 : 1) * WALK_SPEED * dt
+      const analog = w.stick ? Math.min(1, Math.hypot(...w.stick)) : 1
+      const speed = (k.has('ShiftLeft') || k.has('ShiftRight') ? 2.2 : 1) * WALK_SPEED * dt * analog
       const fx = Math.cos(w.yaw), fy = Math.sin(w.yaw)
       let dx = fx * f + fy * s, dy = fy * f - fx * s
       const n = Math.hypot(dx, dy)
@@ -441,9 +574,59 @@ export class Viewer {
     this.camera.lookAt(w.pos[0] + Math.cos(w.yaw) * cp, w.pos[1] + Math.sin(w.yaw) * cp, EYE_HEIGHT + Math.sin(w.pitch))
   }
 
+  /** 走動時按 E:開關面前最近的那扇門 */
+  private toggleNearestDoor() {
+    const w = this.walk
+    if (!w) return
+    const fwd = new THREE.Vector2(Math.cos(w.yaw), Math.sin(w.yaw))
+    let best: DoorHandle | null = null, bestD = DOOR_REACH
+    const v = new THREE.Vector3()
+    for (const d of this.doors) {
+      for (const pv of d.pivots) {
+        pv.getWorldPosition(v)
+        const rel = new THREE.Vector2(v.x - w.pos[0], v.y - w.pos[1])
+        const dist = rel.length()
+        if (dist < bestD && rel.dot(fwd) > -200) { best = d; bestD = dist }
+      }
+    }
+    if (best) { best.open = !best.open; this.onDoorsChange?.() }
+  }
+
+  /** 觸控的虛擬搖桿(左下角) */
+  private showStick() {
+    const base = document.createElement('div')
+    base.className = 'stick'
+    const knob = document.createElement('div')
+    base.appendChild(knob)
+    this.host.appendChild(base)
+    this.stickEl = base
+    const R = 50
+    const move = (e: PointerEvent) => {
+      const r = base.getBoundingClientRect()
+      let x = e.clientX - (r.left + r.width / 2), y = e.clientY - (r.top + r.height / 2)
+      const n = Math.hypot(x, y)
+      if (n > R) { x = (x / n) * R; y = (y / n) * R }
+      knob.style.transform = `translate(${x}px, ${y}px)`
+      if (this.walk) this.walk.stick = [x / R, y / R]
+    }
+    const end = () => { knob.style.transform = ''; if (this.walk) this.walk.stick = null }
+    base.addEventListener('pointerdown', (e) => { base.setPointerCapture(e.pointerId); move(e); e.stopPropagation() })
+    base.addEventListener('pointermove', (e) => { if (e.buttons) move(e) })
+    base.addEventListener('pointerup', end)
+    base.addEventListener('pointercancel', end)
+  }
+
   private blocked(p: Point) {
     return (this.built?.blockers ?? []).some(([a, b]) => distToSegment(p, a, b) < BODY_RADIUS)
   }
+}
+
+const TOUCH = typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse)').matches
+
+/** 往上找到家具的群組(建模時在群組上記了 furnitureId) */
+function furnitureOf(o: THREE.Object3D): THREE.Object3D | null {
+  for (let p: THREE.Object3D | null = o; p; p = p.parent) if (p.userData.furnitureId) return p
+  return null
 }
 
 function isVisible(o: THREE.Object3D): boolean {

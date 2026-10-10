@@ -10,7 +10,11 @@ export interface Wall {
   b: Point
   thickness: number
   height: number
+  /** 牆的種類:承重(不能拆)、外牆、一般隔間、矮牆;沒標 = 一般 */
+  kind?: WallKind | null
 }
+
+export type WallKind = 'bearing' | 'exterior' | 'partition' | 'low'
 
 /** 掛在牆上的門、窗、開放通道。offset = 開口中心離牆起點 a 的距離 */
 export interface Opening {
@@ -67,6 +71,10 @@ export interface Scene {
     wall_thickness: number
     /** 牆面顏色,舊檔案沒有這個欄位 */
     wall_color?: string
+    /** 地板材料單價(元/m²),蓋過預設 */
+    prices?: Record<string, number> | null
+    /** 材料損耗比例,預設 0.05 */
+    waste?: number
     background: Background | null
   }
   walls: Wall[]

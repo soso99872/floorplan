@@ -4,7 +4,7 @@
 (x 向右、y 向上,原點在原圖左下角),角度單位是度、逆時針為正。
 前端的 TypeScript 型別(frontend/src/scene/types.ts)必須跟這份保持一致。
 """
-from typing import List, Literal, Optional, Tuple
+from typing import Dict, List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, Field
 
@@ -20,6 +20,8 @@ class Wall(BaseModel):
     b: Point
     thickness: float = Field(gt=0)
     height: float = Field(gt=0)
+    # 牆的種類:bearing 承重(不能拆)、exterior 外牆、partition 一般隔間(可拆)、low 矮牆;None = 沒標
+    kind: Optional[Literal["bearing", "exterior", "partition", "low"]] = None
 
 
 class Opening(BaseModel):
@@ -76,6 +78,8 @@ class Meta(BaseModel):
     wall_height: float
     wall_thickness: float
     wall_color: str = "#f2efe9"  # 牆面顏色
+    prices: Optional[Dict[str, float]] = None  # 地板材料單價(元/m²),蓋過預設
+    waste: float = 0.05  # 材料損耗比例
     background: Optional[Background] = None
 
 

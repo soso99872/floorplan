@@ -78,6 +78,10 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .plan .wallhit { fill: transparent; stroke: none; cursor: move; }
 .plan .wallhit:hover { fill: rgba(47,111,219,.25); }
 .plan .wallhit.sel { fill: rgba(47,111,219,.45); }
+.plan.show-bearing .wallhit.bearing { fill: rgba(184,65,44,.75); }
+.plan .wallhit.low { fill: rgba(251,250,247,.55); }
+.plan.tool-demolish .wallhit:hover { fill: rgba(214,69,69,.5); cursor: not-allowed; }
+.plan.tool-demolish .wallhit:not(.bearing):hover { cursor: crosshair; }
 .plan .opening polygon { fill: #fbfaf7; stroke: none; }
 .plan .opening line, .plan .opening polyline { stroke: #2b313b; stroke-width: 1.2px; vector-effect: non-scaling-stroke; fill: none; }
 .plan .opening.window line { stroke: #1e7bd0; }
@@ -85,10 +89,10 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .plan .opening { cursor: ew-resize; }
 .plan .opening:hover polygon, .plan .opening.sel polygon { fill: #cfe0fb; }
 .plan .opening.sel line, .plan .opening.sel polyline { stroke: var(--accent); stroke-width: 2px; }
-.plan .furn polygon { fill-opacity: .8; stroke: #4a4f58; stroke-width: 1px; vector-effect: non-scaling-stroke; cursor: move; }
-.plan .furn .back { stroke: #4a4f58; stroke-width: 3px; vector-effect: non-scaling-stroke; }
-.plan .furn:hover polygon { stroke: var(--accent); }
-.plan .furn.sel polygon { stroke: var(--accent); stroke-width: 2.5px; }
+.plan .furn .sym rect, .plan .furn .sym ellipse { stroke: #5a5f68; stroke-width: .6px; vector-effect: non-scaling-stroke; }
+.plan .furn .hit { fill: transparent; stroke: none; cursor: move; }
+.plan .furn:hover .hit { stroke: var(--accent); stroke-width: 1.5px; vector-effect: non-scaling-stroke; }
+.plan .furn.sel .hit { stroke: var(--accent); stroke-width: 2.5px; vector-effect: non-scaling-stroke; }
 .plan .handle { fill: #fff; stroke: var(--accent); stroke-width: 2px; vector-effect: non-scaling-stroke; cursor: grab; }
 .plan .handle.rot { cursor: alias; }
 .plan .rotline { stroke: var(--accent); stroke-width: 1px; vector-effect: non-scaling-stroke; }
@@ -142,6 +146,38 @@ details .log { margin-top: 6px; }
 .credits { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.7; }
 .credits a { color: var(--accent); }
 .field select { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 6px; padding: 3px 6px; }
+
+/* 家具庫 */
+.library { display: flex; flex-direction: column; gap: 6px; }
+.library input[type=search] { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 6px; padding: 4px 8px; }
+.lib-head { border: 0; background: none; text-align: left; padding: 4px 2px; font-weight: 600; color: var(--ink); }
+.lib-head .muted { font-weight: normal; font-size: 12px; }
+.lib-items { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+.lib-items button { display: flex; gap: 6px; align-items: center; text-align: left; padding: 4px 6px; font-size: 12px; cursor: grab; }
+.lib-items button i { flex: none; width: 18px; height: 18px; border-radius: 4px; border: 1px solid rgba(0,0,0,.15); }
+.lib-items button span { display: flex; flex-direction: column; line-height: 1.25; }
+.lib-items button small { color: var(--muted); font-size: 10px; }
+.lib-items button.on small { color: #e8eefc; }
+
+.wall-kind { margin-bottom: 4px; }
+.note.warn { color: var(--bad); }
+table.cost td:not(:first-child) { white-space: nowrap; }
+table.cost input[type=number] { width: 62px; padding: 1px 4px; text-align: right; }
+table.cost th { width: auto; }
+table.cost tfoot td { font-weight: 600; border-top: 2px solid var(--ink); }
+
+.toolbar .sun { display: inline-flex; align-items: center; gap: 4px; background: rgba(255,255,255,.92); color: #1d2433; border-radius: 6px; padding: 2px 8px; font-size: 13px; }
+.toolbar .sun input { width: 90px; }
+.toolbar .sun span { font-variant-numeric: tabular-nums; width: 38px; }
+.stick { position: absolute; left: 28px; bottom: 60px; width: 120px; height: 120px; border-radius: 50%; background: rgba(255,255,255,.18); border: 2px solid rgba(255,255,255,.5); z-index: 5; touch-action: none; display: grid; place-items: center; }
+.stick > div { width: 50px; height: 50px; border-radius: 50%; background: rgba(255,255,255,.85); pointer-events: none; transition: transform .05s; }
+.share-page table.rooms tr { cursor: pointer; }
+
+.plan .grid { stroke: #d9dde3; stroke-width: 1px; vector-effect: non-scaling-stroke; pointer-events: none; }
+.plan .label.wdim { font-size: 10px; fill: #6b7385; }
+.plan-toolbar { position: absolute; top: 8px; left: 8px; display: flex; gap: 4px; flex-wrap: wrap; z-index: 2; }
+.plan-toolbar button { font-size: 12px; padding: 2px 8px; background: rgba(255,255,255,.92); }
+.plan-toolbar button.on { background: var(--accent); color: #fff; }
 
 /* 分享 */
 .dialog.wide { width: min(620px, 94vw); max-height: 88vh; overflow: auto; display: flex; flex-direction: column; gap: 10px; }

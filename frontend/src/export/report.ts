@@ -1,6 +1,7 @@
 // 給客戶的報告:A4 版面的網頁,開新視窗後叫出列印對話框,選「另存為 PDF」就是 PDF。
 // 用瀏覽器列印而不是在伺服器產生 PDF:中文字型、圖片品質都交給瀏覽器,不用另外裝字型。
 import type { Scene } from '../scene/types'
+import { floorCost } from '../scene/materials'
 import { PING_M2, openingRows, roomRows } from './tables'
 
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!)
@@ -11,6 +12,7 @@ export function reportHtml(scene: Scene, title: string, images: ReportImages): s
   const rooms = roomRows(scene)
   const total = rooms.reduce((s, r) => s + r.area, 0)
   const openings = openingRows(scene)
+  const cost = floorCost(scene)
   const date = new Date().toLocaleDateString('zh-TW', { year: 'numeric', month: 'long', day: 'numeric' })
   const xs = scene.walls.flatMap((w) => [w.a[0], w.b[0]])
   const ys = scene.walls.flatMap((w) => [w.a[1], w.b[1]])
@@ -61,6 +63,12 @@ export function reportHtml(scene: Scene, title: string, images: ReportImages): s
       <thead><tr><th>房間</th><th class="n">面積 (m²)</th><th class="n">坪</th><th class="n">周長 (m)</th><th>地板</th></tr></thead>
       <tbody>${rooms.map((r) => `<tr><td>${esc(r.name)}</td><td class="n">${r.area.toFixed(2)}</td><td class="n">${r.ping.toFixed(2)}</td><td class="n">${r.perimeter.toFixed(2)}</td><td>${esc(r.floor)}</td></tr>`).join('')}</tbody>
       <tfoot><tr><td>合計(室內)</td><td class="n">${total.toFixed(2)}</td><td class="n">${(total / PING_M2).toFixed(2)}</td><td></td><td></td></tr></tfoot>
+    </table>
+    <h2>地板材料估算(含 ${Math.round(cost.waste * 100)}% 損耗)</h2>
+    <table>
+      <thead><tr><th>材料</th><th class="n">面積 (m²)</th><th class="n">單價 (元/m²)</th><th class="n">小計 (元)</th></tr></thead>
+      <tbody>${cost.rows.map((r) => `<tr><td>${esc(r.name)}</td><td class="n">${r.area.toFixed(2)}</td><td class="n">${r.price.toLocaleString()}</td><td class="n">${Math.round(r.cost).toLocaleString()}</td></tr>`).join('')}</tbody>
+      <tfoot><tr><td>合計</td><td></td><td></td><td class="n">NT$ ${Math.round(cost.total).toLocaleString()}</td></tr></tfoot>
     </table>
     <h2>門窗表</h2>
     <table>

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { t } from '../i18n'
 
 /** [名稱, 說明, 執行];執行時要同步開始(客戶報告要在點擊當下開新視窗,不然會被擋) */
 export type ExportItem = [string, string, () => Promise<unknown>]
@@ -24,14 +25,14 @@ export function ExportMenu({ items, onError }: { items: ExportItem[]; onError: (
   return (
     <div className="export-menu" ref={ref}>
       <button className="primary" disabled={!!busy} onClick={() => setOpen(!open)}>
-        {busy ? `匯出 ${busy}…` : '匯出 ▾'}
+        {busy ? `${t('匯出')} ${t(busy)}…` : t('匯出 ▾')}
       </button>
       {open && (
         <div className="menu">
           {items.map((it) => (
             <button key={it[0]} onClick={() => run(it)}>
-              <b>{it[0]}</b>
-              <span>{it[1]}</span>
+              <b>{t(it[0])}</b>
+              <span>{t(it[1])}</span>
             </button>
           ))}
         </div>

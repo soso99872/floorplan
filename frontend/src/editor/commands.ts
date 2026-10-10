@@ -1,27 +1,14 @@
 // 編輯指令:一律是「舊 Scene → 新 Scene」的純函式,不改動傳進來的物件(復原/重做靠保留舊的 Scene)。
+import type { LibraryItem } from '../scene/catalog'
 import type { Furniture, Opening, Point, Room, Scene, Wall } from '../scene/types'
 import {
-  add, dist, distToWall, mul, newId, openingCenter, project, round1, roundPt, wallFrame,
+  add, dist, distToWall, dot, mul, newId, openingCenter, project, round1, roundPt, sub, wallFrame,
 } from './geometry'
 import { computeRooms } from './rooms'
 
 export type SelKind = 'wall' | 'opening' | 'furniture' | 'room'
 export interface Sel { kind: SelKind; id: string }
 
-/** 新增家具的預設尺寸(寬 × 深 mm)與顏色;床的寬是床頭那一邊 */
-export const FURNITURE_DEFAULTS: Record<string, { width: number; depth: number; color: string }> = {
-  bed: { width: 1500, depth: 2000, color: '#d9cdb8' },
-  sofa: { width: 2000, depth: 900, color: '#8d8f96' },
-  table: { width: 1600, depth: 900, color: '#a47b54' },
-  low_table: { width: 1000, depth: 500, color: '#9c7b5c' },
-  wardrobe: { width: 1800, depth: 600, color: '#c9b79c' },
-  cabinet: { width: 1500, depth: 450, color: '#b9a58a' },
-  counter: { width: 2400, depth: 600, color: '#d6d3cc' },
-  fixture: { width: 700, depth: 700, color: '#eef1f2' },
-  lamp: { width: 400, depth: 400, color: '#e9dcc0' },
-  rug: { width: 2000, depth: 1400, color: '#b8a68f' },
-  other: { width: 800, depth: 800, color: '#b0a89c' },
-}
 export const OPENING_DEFAULTS = {
   door: { width: 900, sill: 0, head: 2100, leaves: 1 },
   window: { width: 1200, sill: 900, head: 2100, leaves: 0 },
@@ -46,11 +33,14 @@ function afterWallChange(prev: Scene, walls: Wall[]): Scene {
   return { ...next, rooms: computeRooms(next) }
 }
 
+/** 承重牆不能拆、不能移動 */
+export const isBearing = (scene: Scene, wallId: string) => scene.walls.some((w) => w.id === wallId && w.kind === 'bearing')
+
 /** 跟某個端點接在一起的牆端點(距離小於牆厚一半) */
 function joinedEnds(scene: Scene, p: Point, except?: string): [string, 'a' | 'b'][] {
   const out: [string, 'a' | 'b'][] = []
   for (const w of scene.walls) {
-    if (w.id === except) continue
+    if (w.id === except || w.kind === 'bearing') continue // 承重牆不跟著動
     const tol = w.thickness / 2 + 1
     if (dist(w.a, p) < tol) out.push([w.id, 'a'])
     if (dist(w.b, p) < tol) out.push([w.id, 'b'])
@@ -61,7 +51,7 @@ function joinedEnds(scene: Scene, p: Point, except?: string): [string, 'a' | 'b'
 /** 拖曳牆端點:接在同一點的其他牆端點一起動。base 是開始拖曳時的 Scene */
 export function moveEndpoint(base: Scene, wallId: string, end: 'a' | 'b', p: Point): Scene {
   const w = base.walls.find((x) => x.id === wallId)
-  if (!w) return base
+  if (!w || w.kind === 'bearing') return base
   const moving = new Set([`${wallId}:${end}`, ...joinedEnds(base, w[end], wallId).map(([id, e]) => `${id}:${e}`)])
   const q = roundPt(p)
   const walls = base.walls.map((x) => {
@@ -75,12 +65,12 @@ export function moveEndpoint(base: Scene, wallId: string, end: 'a' | 'b', p: Poi
 /** 整道牆往法線方向平移 d mm:接在它兩端、或丁字接在它身上的牆會跟著伸縮 */
 export function moveWall(base: Scene, wallId: string, d: number): Scene {
   const w = base.walls.find((x) => x.id === wallId)
-  if (!w) return base
+  if (!w || w.kind === 'bearing') return base
   const delta = mul(wallFrame(w).n, d)
   const moving = new Set<string>([`${wallId}:a`, `${wallId}:b`])
   for (const [id, e] of [...joinedEnds(base, w.a, wallId), ...joinedEnds(base, w.b, wallId)]) moving.add(`${id}:${e}`)
   for (const x of base.walls) {
-    if (x.id === wallId) continue
+    if (x.id === wallId || x.kind === 'bearing') continue
     for (const e of ['a', 'b'] as const) if (distToWall(w, x[e]) < w.thickness / 2 + 1) moving.add(`${x.id}:${e}`)
   }
   const walls = base.walls.map((x) => {
@@ -159,13 +149,61 @@ export function updateOpening(scene: Scene, id: string, patch: Partial<Opening>)
 
 // ---------- 家具 ----------
 
-export function addFurniture(scene: Scene, type: string, p: Point): { scene: Scene; id: string } {
-  const def = FURNITURE_DEFAULTS[type] ?? FURNITURE_DEFAULTS.other
+/** 從家具庫放一件家具;靠近牆就自動轉向、貼牆(背面靠牆) */
+export function addFurniture(scene: Scene, item: LibraryItem, p: Point): { scene: Scene; id: string } {
   const id = newId('f', scene.furniture)
-  const f: Furniture = { id, type, x: round1(p[0]), y: round1(p[1]), angle: 0, width: def.width, depth: def.depth, color: def.color, options: {} }
+  let f: Furniture = {
+    id, type: item.type, x: round1(p[0]), y: round1(p[1]), angle: 0, width: item.w, depth: item.d,
+    color: item.color, options: { ...(item.options ?? {}) },
+  }
+  f = { ...f, ...snapToWall(scene, f, true) }
   return { scene: { ...scene, furniture: [...scene.furniture, f] }, id }
 }
 
+/** 複製一件家具,放在旁邊 */
+export function duplicateFurniture(scene: Scene, id: string): { scene: Scene; id: string } | null {
+  const f = scene.furniture.find((x) => x.id === id)
+  if (!f) return null
+  const nid = newId('f', scene.furniture)
+  const r = (f.angle * Math.PI) / 180
+  const step = f.width + 100
+  const copy = { ...f, id: nid, x: round1(f.x + Math.cos(r) * step), y: round1(f.y + Math.sin(r) * step) }
+  return { scene: { ...scene, furniture: [...scene.furniture, copy] }, id: nid }
+}
+
+const SNAP_GAP = 350 // 家具背面離牆面這麼近,就貼上去
+
+/**
+ * 貼牆:找最近的牆,背面(局部 +y)離牆面夠近就貼齊。
+ * rotate = true 時(剛放下)也會自動轉向讓背面朝牆;拖曳時只在方向本來就差不多朝牆時才貼,不亂轉。
+ */
+export function snapToWall(scene: Scene, f: Furniture, rotate = false): Partial<Furniture> {
+  const c: Point = [f.x, f.y]
+  let best: { n: Point; foot: Point; t: number; gap: number } | null = null
+  for (const w of scene.walls) {
+    const { u, n, length } = wallFrame(w)
+    const d = sub(c, w.a)
+    const along = dot(d, u)
+    if (along < -f.width / 2 || along > length + f.width / 2) continue
+    const across = dot(d, n)
+    const toWall: Point = across > 0 ? [-n[0], -n[1]] : n // 從家具指向牆
+    const foot = add(w.a, mul(u, Math.max(0, Math.min(length, along))))
+    const gap = Math.abs(across) - w.thickness / 2
+    if (!best || gap < best.gap) best = { n: toWall, foot, t: w.thickness, gap }
+  }
+  if (!best) return {}
+  const wallAngle = (Math.atan2(-best.n[0], best.n[1]) * 180) / Math.PI // 背面朝牆時的角度
+  const diff = Math.abs(((f.angle - wallAngle + 540) % 360) - 180)
+  const angle = rotate ? wallAngle : f.angle
+  const depthAlong = rotate || diff < 20 ? f.depth : diff > 70 && diff < 110 ? f.width : null
+  if (depthAlong === null || best.gap - depthAlong / 2 > SNAP_GAP) return {}
+  if (!rotate && diff >= 20 && !(diff > 70 && diff < 110)) return {}
+  // 中心 = 牆面往室內退半個深度
+  const face = add(best.foot, mul(best.n, -best.t / 2))
+  const along = dot(sub(c, face), [-best.n[1], best.n[0]])
+  const center = add(add(face, mul([-best.n[1], best.n[0]], along)), mul(best.n, -depthAlong / 2))
+  return { x: round1(center[0]), y: round1(center[1]), angle: Math.round(angle * 100) / 100 }
+}
 export function updateFurniture(scene: Scene, id: string, patch: Partial<Furniture>): Scene {
   return { ...scene, furniture: scene.furniture.map((f) => (f.id === id ? { ...f, ...patch } : f)) }
 }
@@ -185,6 +223,7 @@ export function updateRoom(scene: Scene, id: string, patch: Partial<Room>): Scen
 export function remove(scene: Scene, sel: Sel): Scene {
   switch (sel.kind) {
     case 'wall':
+      if (isBearing(scene, sel.id)) return scene
       return afterWallChange(
         { ...scene, openings: scene.openings.filter((o) => o.wall !== sel.id) },
         scene.walls.filter((w) => w.id !== sel.id),

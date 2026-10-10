@@ -1,11 +1,12 @@
 // 2D 平面編輯視圖(SVG)。模型座標 mm、y 向上;畫面用一個 y 翻轉的 <g> 直接畫 mm,文字另外畫在螢幕座標。
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { t } from '../i18n'
 import polygonClipping, { type Polygon } from 'polygon-clipping'
-import type { Opening, Point, Scene, Wall } from '../scene/types'
-import { CATALOG } from '../scene/catalog'
+import type { Furniture, Opening, Point, Scene, Wall } from '../scene/types'
+import { CATALOG, furnitureParts, type LibraryItem } from '../scene/catalog'
 import { FLOOR_MATERIALS, floorMaterialId } from '../scene/materials'
 import {
-  addFurniture, addOpening, addWall, moveEndpoint, moveOpening, moveWall, updateFurniture, type Sel,
+  addFurniture, addOpening, addWall, isBearing, moveEndpoint, moveOpening, moveWall, remove, snapToWall, updateFurniture, type Sel,
 } from './commands'
 import {
   add, centroid, dist, distToWall, dot, furnitureCorners, mul, openingCenter, project, sceneBounds, strip, sub,
@@ -13,16 +14,17 @@ import {
 } from './geometry'
 import type { Editor } from './store'
 
-export type Tool = 'select' | 'wall' | 'door' | 'window' | 'passage' | 'furniture' | 'measure'
+export type Tool = 'select' | 'wall' | 'door' | 'window' | 'passage' | 'furniture' | 'demolish' | 'measure'
 
 interface Props {
   editor: Editor
   tool: Tool
-  furnitureType: string
+  furnitureType: LibraryItem
   /** 換了新的場景(載入、開檔)時改變,畫面會重新縮放到整張圖 */
   fitKey: number
   onTool: (t: Tool) => void
   onMeasure: (a: Point, b: Point) => void
+  onMessage?: (text: string) => void
 }
 
 interface View { cx: number; cy: number; k: number }
@@ -49,7 +51,7 @@ function isOrtho(d: Point) {
 const pts = (p: Point[]) => p.map(([x, y]) => `${x},${y}`).join(' ')
 const ring = (p: Point[]): [number, number][] => [...p, p[0]].map(([x, y]) => [x, y])
 
-export function PlanView({ editor, tool, furnitureType, fitKey, onTool, onMeasure }: Props) {
+export function PlanView({ editor, tool, furnitureType, fitKey, onTool, onMeasure, onMessage }: Props) {
   const { scene, sel } = editor
   const svgRef = useRef<SVGSVGElement>(null)
   const [size, setSize] = useState({ w: 800, h: 600 })
@@ -58,6 +60,12 @@ export function PlanView({ editor, tool, furnitureType, fitKey, onTool, onMeasur
   const [chain, setChain] = useState<Point | null>(null) // 畫牆:上一個點
   const [measureA, setMeasureA] = useState<Point | null>(null)
   const drag = useRef<Drag | null>(null)
+  const [layers, setLayers] = useState<Layers>(loadLayers)
+  const toggleLayer = (k: keyof Layers) => {
+    const next = { ...layers, [k]: !layers[k] }
+    setLayers(next)
+    try { localStorage.setItem(LAYER_KEY, JSON.stringify(next)) } catch { /* 存不了就算了 */ }
+  }
 
   // 視窗大小
   useLayoutEffect(() => {
@@ -218,6 +226,12 @@ export function PlanView({ editor, tool, furnitureType, fitKey, onTool, onMeasur
         onTool('select')
         return
       }
+      case 'demolish': {
+        if (kind !== 'wall') return
+        if (isBearing(scene, id)) { onMessage?.('承重牆不能拆除'); return }
+        editor.apply(remove(scene, { kind: 'wall', id }))
+        return
+      }
       case 'measure': {
         const q = snap(p, measureA)
         if (!measureA) setMeasureA(q)
@@ -254,9 +268,10 @@ export function PlanView({ editor, tool, furnitureType, fitKey, onTool, onMeasur
       case 'furniture': {
         const f = d.base.furniture.find((x) => x.id === d.id)!
         const delta = sub(p, d.start)
-        editor.apply(updateFurniture(d.base, d.id, {
-          x: Math.round((f.x + delta[0]) / GRID_MM) * GRID_MM, y: Math.round((f.y + delta[1]) / GRID_MM) * GRID_MM,
-        }), d.key)
+        const moved = { ...f, x: Math.round((f.x + delta[0]) / GRID_MM) * GRID_MM, y: Math.round((f.y + delta[1]) / GRID_MM) * GRID_MM }
+        // 按住 Alt 不貼牆
+        const snapped = e.altKey ? {} : snapToWall(d.base, moved)
+        editor.apply(updateFurniture(d.base, d.id, { x: moved.x, y: moved.y, ...snapped }), d.key)
         return
       }
       case 'rotate': {
@@ -280,6 +295,42 @@ export function PlanView({ editor, tool, furnitureType, fitKey, onTool, onMeasur
   const wallPath = useMemo(() => (scene ? wallOutline(scene) : ''), [scene])
   if (!scene) return <svg ref={svgRef} className="plan" />
 
+  /** 匯出目前畫面的平面圖 PNG(2 倍解析度,白底;樣式從頁面的 CSS 帶進去) */
+  async function exportPng() {
+    const svg = svgRef.current!
+    const clone = svg.cloneNode(true) as SVGSVGElement
+    const css = [...document.styleSheets].flatMap((sh) => {
+      try { return [...sh.cssRules].map((r) => r.cssText).filter((t) => t.includes('.plan')) } catch { return [] }
+    }).join('\n')
+    const style = document.createElementNS('http://www.w3.org/2000/svg', 'style')
+    style.textContent = css
+    clone.insertBefore(style, clone.firstChild)
+    clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg')
+    clone.setAttribute('width', String(size.w))
+    clone.setAttribute('height', String(size.h))
+    clone.querySelectorAll('.handle, .rotline, .cursor, .ghost').forEach((n) => n.remove())
+    const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(clone)], { type: 'image/svg+xml' }))
+    const img = new Image()
+    await new Promise((ok, fail) => { img.onload = ok; img.onerror = fail; img.src = url })
+    const scale = 2
+    const canvas = document.createElement('canvas')
+    canvas.width = size.w * scale
+    canvas.height = size.h * scale
+    const ctx = canvas.getContext('2d')!
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(0, 0, canvas.width, canvas.height)
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+    URL.revokeObjectURL(url)
+    canvas.toBlob((b) => {
+      if (!b) return
+      const a = document.createElement('a')
+      a.href = URL.createObjectURL(b)
+      a.download = '平面圖.png'
+      a.click()
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000)
+    }, 'image/png')
+  }
+
   const k = view.k
   const matrix = `matrix(${k},0,0,${-k},${size.w / 2 - view.cx * k},${size.h / 2 + view.cy * k})`
   const bg = scene.meta.background
@@ -292,19 +343,49 @@ export function PlanView({ editor, tool, furnitureType, fitKey, onTool, onMeasur
   const measureEnd = tool === 'measure' && hover ? snap(hover, measureA) : null
 
   const labels: { p: Point; text: string; sub?: string; cls?: string }[] = []
-  for (const r of scene.rooms) labels.push({ p: centroid(r.polygon), text: r.name, sub: `${r.area.toFixed(1)} m²` })
+  if (layers.labels) for (const r of scene.rooms) labels.push({ p: centroid(r.polygon), text: r.name, sub: `${r.area.toFixed(1)} m²` })
+  if (layers.dims) {
+    for (const w of scene.walls) {
+      const { length, n } = wallFrame(w)
+      if (length < 500 || w.id === selWall?.id) continue
+      const mid = add(w.a, mul(sub(w.b, w.a), 0.5))
+      labels.push({ p: add(mid, mul(n, w.thickness / 2 + px(9))), text: `${Math.round(length)}`, cls: 'wdim' })
+    }
+  }
   if (selWall) labels.push({ p: add(selWall.a, mul(sub(selWall.b, selWall.a), 0.5)), text: `${Math.round(wallFrame(selWall).length)} mm`, cls: 'dim' })
   if (chain && wallEnd) labels.push({ p: add(chain, mul(sub(wallEnd, chain), 0.5)), text: `${Math.round(dist(chain, wallEnd))} mm`, cls: 'dim' })
   if (measureA && measureEnd) labels.push({ p: add(measureA, mul(sub(measureEnd, measureA), 0.5)), text: `${Math.round(dist(measureA, measureEnd))} mm(圖上)`, cls: 'dim' })
 
+  const grid: number[][] = []
+  if (layers.grid) { // 1 m 格線,只畫看得到的範圍
+    const x0 = view.cx - size.w / 2 / k, x1 = view.cx + size.w / 2 / k
+    const y0 = view.cy - size.h / 2 / k, y1 = view.cy + size.h / 2 / k
+    if ((x1 - x0) / 1000 < 200) {
+      for (let x = Math.ceil(x0 / 1000) * 1000; x <= x1; x += 1000) grid.push([x, y0, x, y1])
+      for (let y = Math.ceil(y0 / 1000) * 1000; y <= y1; y += 1000) grid.push([x0, y, x1, y])
+    }
+  }
+
   return (
-    <svg ref={svgRef} className={`plan tool-${tool}`}
+    <>
+    <svg ref={svgRef} className={`plan tool-${tool}` + (layers.bearing ? ' show-bearing' : '')}
       onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}
       onPointerLeave={() => setHover(null)} onContextMenu={(e) => e.preventDefault()}
+      onDragOver={(e) => { if (e.dataTransfer.types.includes(DRAG_TYPE)) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy' } }}
+      onDrop={(e) => {
+        const raw = e.dataTransfer.getData(DRAG_TYPE)
+        if (!raw || !scene) return
+        e.preventDefault()
+        const r = addFurniture(scene, JSON.parse(raw) as LibraryItem, toModel(e))
+        editor.apply(r.scene)
+        editor.select({ kind: 'furniture', id: r.id })
+      }}
       onDoubleClick={() => setChain(null)}>
       <g transform={matrix}>
         {bg && <image href={bg.src} width={bg.width} height={bg.height} opacity={0.35}
           transform={`translate(0,${bg.height}) scale(1,-1)`} style={{ pointerEvents: 'none' }} />}
+
+        {grid.map(([a, b, c, d], i) => <line key={i} x1={a} y1={b} x2={c} y2={d} className="grid" />)}
 
         {scene.rooms.map((r) => (
           <polygon key={r.id} data-kind="room" data-id={r.id} points={pts(r.polygon)}
@@ -312,21 +393,18 @@ export function PlanView({ editor, tool, furnitureType, fitKey, onTool, onMeasur
             style={{ fill: FLOOR_MATERIALS[floorMaterialId(r)].swatch }} />
         ))}
 
-        {scene.furniture.map((f) => {
-          const c = furnitureCorners(f)
-          return (
-            <g key={f.id} data-kind="furniture" data-id={f.id}
-              className={'furn' + (selFurn?.id === f.id ? ' sel' : '')}>
-              <polygon points={pts(c)} style={{ fill: f.color }} />
-              <line x1={c[2][0]} y1={c[2][1]} x2={c[3][0]} y2={c[3][1]} className="back" />
-            </g>
-          )
-        })}
+        {layers.furniture && scene.furniture.map((f) => (
+          <g key={f.id} data-kind="furniture" data-id={f.id}
+            className={'furn' + (selFurn?.id === f.id ? ' sel' : '')}>
+            <FurnitureSymbol f={f} />
+            <polygon points={pts(furnitureCorners(f))} className="hit" />
+          </g>
+        ))}
 
         <path d={wallPath} className="walls" fillRule="evenodd" />
         {scene.walls.map((w) => (
           <polygon key={w.id} data-kind="wall" data-id={w.id} points={pts(strip(w, 0, wallFrame(w).length, w.thickness))}
-            className={'wallhit' + (selWall?.id === w.id ? ' sel' : '')} />
+            className={'wallhit' + (selWall?.id === w.id ? ' sel' : '') + (w.kind === 'bearing' ? ' bearing' : '') + (w.kind === 'low' ? ' low' : '')} />
         ))}
 
         {scene.openings.map((o) => {
@@ -378,9 +456,46 @@ export function PlanView({ editor, tool, furnitureType, fitKey, onTool, onMeasur
       })}
       {selFurn && (() => {
         const [x, y] = toScreen([selFurn.x, selFurn.y])
-        return <text x={x} y={y + 4} className="label furnname">{CATALOG[selFurn.type]?.name ?? selFurn.type}</text>
+        return <text x={x} y={y + 4} className="label furnname">{t(CATALOG[selFurn.type]?.name ?? selFurn.type)}</text>
       })()}
     </svg>
+    <div className="plan-toolbar">
+      {LAYER_NAMES.map(([key, label]) => (
+        <button key={key} className={layers[key] ? 'on' : ''} onClick={() => toggleLayer(key)}>{t(label)}</button>
+      ))}
+      <button title={t("匯出目前畫面的平面圖 PNG")} onClick={() => { exportPng().catch(() => onMessage?.('匯出 PNG 失敗')) }}>{t("匯出 PNG")}</button>
+    </div>
+    </>
+  )
+}
+
+interface Layers { dims: boolean; labels: boolean; furniture: boolean; grid: boolean; bearing: boolean }
+const LAYER_KEY = 'fp3d.layers'
+const LAYER_NAMES: [keyof Layers, string][] = [['dims', '尺寸'], ['labels', '房名'], ['furniture', '家具'], ['grid', '網格'], ['bearing', '承重牆']]
+
+function loadLayers(): Layers {
+  const def = { dims: false, labels: true, furniture: true, grid: false, bearing: true }
+  try { return { ...def, ...JSON.parse(localStorage.getItem(LAYER_KEY) ?? '{}') } } catch { return def }
+}
+
+export const DRAG_TYPE = 'application/x-fp3d-furniture'
+
+/** 家具的 2D 符號 = 3D 模型零件的俯視圖(由低到高疊),跟 3D 長得一樣 */
+function FurnitureSymbol({ f }: { f: Furniture }) {
+  const parts = useMemo(() => {
+    const ps = furnitureParts(f.type, f.width, f.depth, f.color, f.options)
+    const top = (p: (typeof ps)[number]) => (p.kind === 'box' ? p.c[2] + p.s[2] / 2 : p.c[2] + p.h)
+    return ps.filter((p) => !(p.kind === 'box' && p.opacity !== undefined)).sort((a, b) => top(a) - top(b))
+  }, [f.type, f.width, f.depth, f.color, f.options])
+  return (
+    <g transform={`translate(${f.x},${f.y}) rotate(${f.angle})`} className="sym">
+      {parts.map((p, i) => p.kind === 'box'
+        ? <rect key={i} x={p.c[0] - p.s[0] / 2} y={p.c[1] - p.s[1] / 2} width={p.s[0]} height={p.s[1]}
+            rx={p.round ?? 0} style={{ fill: p.color }}
+            transform={p.rz ? `rotate(${p.rz} ${p.c[0]} ${p.c[1]})` : undefined} />
+        : <ellipse key={i} cx={p.c[0]} cy={p.c[1]} rx={Math.max(p.r[0], p.r[1]) * p.sx} ry={Math.max(p.r[0], p.r[1]) * p.sy}
+            style={{ fill: p.color }} />)}
+    </g>
   )
 }
 

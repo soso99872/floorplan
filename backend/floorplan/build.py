@@ -138,6 +138,39 @@ class Frame:
         return (round(float(p[0]) * self.mm_per_px, 1), round(float(self.img_h - p[1]) * self.mm_per_px, 1))
 
 
+def outside_mask(walls):
+    """建築外面 = 從圖邊緣灌水灌得到、沒有牆擋住的地方。"""
+    free = (walls == 0).astype(np.uint8)
+    h, w = free.shape
+    pad = np.ones((h + 2, w + 2), np.uint8)  # 外圍補一圈空地,從角落灌得進去
+    pad[1:-1, 1:-1] = free
+    mask = np.zeros((h + 4, w + 4), np.uint8)
+    cv2.floodFill(pad, mask, (0, 0), 2)
+    return pad[1:-1, 1:-1] == 2
+
+
+def faces_outside(seg, th, outside):
+    """牆段某一側緊鄰建築外面 = 外牆。沿牆取幾個點,看兩側稍微外面的像素。"""
+    (ax, ay), (bx, by) = seg
+    d = np.array([bx - ax, by - ay], float)
+    L = np.linalg.norm(d)
+    if L < 1:
+        return False
+    u = d / L
+    n = np.array([-u[1], u[0]])
+    h, w = outside.shape
+    hits = 0
+    samples = np.linspace(0.15, 0.85, 7)
+    for k in samples:
+        c = np.array([ax, ay]) + u * L * k
+        for side in (1, -1):
+            x, y = (c + n * side * (th / 2 + 3)).round().astype(int)
+            if 0 <= y < h and 0 <= x < w and outside[y, x]:
+                hits += 1
+                break
+    return hits >= len(samples) / 2
+
+
 def make_walls(clean, t, mm_per_px, openings, wall_height, log, t_max=None):
     """開口填回牆裡再規整一次:牆段會連續穿過門窗。回傳 (像素牆段, Scene 牆段, 換算)。"""
     filled = clean.copy()
@@ -147,11 +180,14 @@ def make_walls(clean, t, mm_per_px, openings, wall_height, log, t_max=None):
     rects, leftovers, _ = rz.regularize_walls(filled, t, t_max)
     walls_px = [rect_to_segment(*r) for r in rects] + [poly_to_segment(p) for p in leftovers]
     to_mm = Frame(mm_per_px, clean.shape[0])
+    outside = outside_mask(filled)
     scene_walls = [
-        Wall(id=f"w{i + 1}", a=to_mm(a), b=to_mm(b), thickness=round(th * mm_per_px, 1), height=wall_height)
+        Wall(id=f"w{i + 1}", a=to_mm(a), b=to_mm(b), thickness=round(th * mm_per_px, 1), height=wall_height,
+             kind="exterior" if faces_outside((a, b), th, outside) else "partition")
         for i, (a, b, th) in enumerate(walls_px)
     ]
-    log.append(f"[牆] {len(scene_walls)} 段")
+    n_ext = sum(w.kind == "exterior" for w in scene_walls)
+    log.append(f"[牆] {len(scene_walls)} 段(外牆 {n_ext});承重牆請在編輯器裡標示")
     return walls_px, scene_walls, to_mm
 
 

@@ -8,6 +8,8 @@ export interface FloorMaterial {
   swatch: string
   size: [number, number]
   roughness: number
+  /** 參考單價:元 / m²(含工),只是預設值,可以在造價估算裡改 */
+  price: number
   draw: (ctx: CanvasRenderingContext2D, w: number, h: number, rnd: () => number) => void
 }
 
@@ -127,15 +129,15 @@ function carpet(base: string) {
 }
 
 export const FLOOR_MATERIALS: Record<string, FloorMaterial> = {
-  oak: { name: '橡木地板', swatch: '#c9a479', size: [1200, 1080], roughness: 0.6, draw: planks('#c49a6c', 6) },
-  walnut: { name: '胡桃木地板', swatch: '#7a5638', size: [1200, 1080], roughness: 0.55, draw: planks('#77512f', 6) },
-  ash: { name: '白橡淺木地板', swatch: '#ddc9a8', size: [1200, 1080], roughness: 0.65, draw: planks('#dcc6a2', 6) },
-  tile_white: { name: '白色磁磚 60×60', swatch: '#ecebe7', size: [600, 600], roughness: 0.35, draw: tile('#eeede9', '#c9c6c0') },
-  tile_gray: { name: '灰色磁磚 60×60', swatch: '#a9a7a3', size: [600, 600], roughness: 0.4, draw: tile('#a9a7a2', '#8a8883') },
-  tile_small: { name: '小磁磚 30×30', swatch: '#d9dfe2', size: [300, 300], roughness: 0.3, draw: tile('#dae0e3', '#b5bcbf') },
-  marble: { name: '大理石', swatch: '#e8e4dd', size: [1200, 1200], roughness: 0.2, draw: marble },
-  concrete: { name: '清水模 / 水泥', swatch: '#b5b2ac', size: [1500, 1500], roughness: 0.85, draw: concrete },
-  carpet: { name: '灰色地毯', swatch: '#8f9298', size: [500, 500], roughness: 1, draw: carpet('#8d9097') },
+  oak: { name: '橡木地板', swatch: '#c9a479', size: [1200, 1080], roughness: 0.6, price: 2400, draw: planks('#c49a6c', 6) },
+  walnut: { name: '胡桃木地板', swatch: '#7a5638', size: [1200, 1080], roughness: 0.55, price: 3200, draw: planks('#77512f', 6) },
+  ash: { name: '白橡淺木地板', swatch: '#ddc9a8', size: [1200, 1080], roughness: 0.65, price: 2200, draw: planks('#dcc6a2', 6) },
+  tile_white: { name: '白色磁磚 60×60', swatch: '#ecebe7', size: [600, 600], roughness: 0.35, price: 1800, draw: tile('#eeede9', '#c9c6c0') },
+  tile_gray: { name: '灰色磁磚 60×60', swatch: '#a9a7a3', size: [600, 600], roughness: 0.4, price: 1800, draw: tile('#a9a7a2', '#8a8883') },
+  tile_small: { name: '小磁磚 30×30', swatch: '#d9dfe2', size: [300, 300], roughness: 0.3, price: 2000, draw: tile('#dae0e3', '#b5bcbf') },
+  marble: { name: '大理石', swatch: '#e8e4dd', size: [1200, 1200], roughness: 0.2, price: 6500, draw: marble },
+  concrete: { name: '清水模 / 水泥', swatch: '#b5b2ac', size: [1500, 1500], roughness: 0.85, price: 1500, draw: concrete },
+  carpet: { name: '灰色地毯', swatch: '#8f9298', size: [500, 500], roughness: 1, price: 1200, draw: carpet('#8d9097') },
 }
 
 /** 房間沒指定材質時,依名稱挑一個合理的 */
@@ -168,4 +170,24 @@ export function floorTexture(id: string): THREE.CanvasTexture {
   tex.anisotropy = 8
   textureCache.set(id, tex)
   return tex
+}
+
+export const DEFAULT_WASTE = 0.05
+
+export interface CostRow { id: string; name: string; area: number; price: number; cost: number }
+
+/** 地板材料估算:依材質加總面積 × 單價 × (1 + 損耗) */
+export function floorCost(scene: { rooms: { name: string; area: number; floor_material?: string | null }[];
+  meta: { prices?: Record<string, number> | null; waste?: number } }) {
+  const waste = scene.meta.waste ?? DEFAULT_WASTE
+  const area = new Map<string, number>()
+  for (const r of scene.rooms) {
+    const id = floorMaterialId(r)
+    area.set(id, (area.get(id) ?? 0) + r.area)
+  }
+  const rows: CostRow[] = [...area].map(([id, a]) => {
+    const price = scene.meta.prices?.[id] ?? FLOOR_MATERIALS[id].price
+    return { id, name: FLOOR_MATERIALS[id].name, area: a, price, cost: a * price * (1 + waste) }
+  }).sort((x, y) => y.cost - x.cost)
+  return { rows, waste, total: rows.reduce((s, r) => s + r.cost, 0) }
 }

@@ -1,5 +1,5 @@
 // 房間面積表、門窗表:CSV 匯出與報告共用同一份資料。
-import { FLOOR_MATERIALS, floorMaterialId } from '../scene/materials'
+import { FLOOR_MATERIALS, floorCost, floorMaterialId } from '../scene/materials'
 import type { Scene } from '../scene/types'
 import { polygonArea, wallFrame } from '../editor/geometry'
 
@@ -58,6 +58,11 @@ export function tablesCsv(scene: Scene, title: string): Blob {
     ['房間', '面積 (m²)', '坪', '周長 (m)', '地板材質'],
     ...rooms.map((r) => [r.name, r.area.toFixed(2), r.ping.toFixed(2), r.perimeter.toFixed(2), r.floor]),
     ['合計(室內)', total.toFixed(2), (total / PING_M2).toFixed(2), '', ''],
+    [],
+    ['地板材料估算(含損耗 ' + Math.round(floorCost(scene).waste * 100) + '%)'],
+    ['材料', '面積 (m²)', '單價 (元/m²)', '小計 (元)'],
+    ...floorCost(scene).rows.map((r) => [r.name, r.area.toFixed(2), r.price, Math.round(r.cost)]),
+    ['合計', '', '', Math.round(floorCost(scene).total)],
     [],
     ['門窗表'],
     ['編號', '種類', '寬 (mm)', '高 (mm)', '窗台高 (mm)', '開法', '數量'],

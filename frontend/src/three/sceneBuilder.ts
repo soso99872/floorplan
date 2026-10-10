@@ -1,9 +1,10 @@
 // Scene JSON → three.js 物件。編輯後重新呼叫 buildScene 即可更新 3D。
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
+import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js'
 import polygonClipping, { type MultiPolygon, type Polygon } from 'polygon-clipping'
 import type { Opening, Point, Room, Scene, Wall } from '../scene/types'
-import { doorParts, furnitureParts, windowParts, type Leaf, type Part } from '../scene/catalog'
+import { doorParts, furnitureParts, windowParts, type Leaf, type Mat, type Part } from '../scene/catalog'
 import { FLOOR_MATERIALS, floorMaterialId, floorTexture } from '../scene/materials'
 
 /** 一扇可以開關的門:pivots 是門片的鉸鏈群組,t 是目前打開的比例 0~1 */
@@ -33,6 +34,8 @@ export interface BuiltScene {
   blockers: [Point, Point][]
   /** 走進去時的起點:最大房間的中心 */
   walkStart: Point | null
+  /** 各房間的中心與面積(夜景燈) */
+  rooms: { center: Point; area: number }[]
 }
 
 export const DEFAULT_WALL_COLOR = '#f2efe9'
@@ -191,14 +194,28 @@ export function distToSegment(p: Point, a: Point, b: Point) {
 
 // ---------- 零件 → mesh ----------
 
+/** 各材質的粗糙度 / 金屬感:布料霧面、陶瓷和烤漆會反光、金屬有金屬感 */
+const MAT_PROPS: Record<Mat, { roughness: number; metalness: number }> = {
+  wood: { roughness: 0.62, metalness: 0 },
+  fabric: { roughness: 0.95, metalness: 0 },
+  metal: { roughness: 0.28, metalness: 0.9 },
+  ceramic: { roughness: 0.12, metalness: 0 },
+  glass: { roughness: 0.05, metalness: 0.1 },
+  plastic: { roughness: 0.38, metalness: 0 },
+  leaf: { roughness: 0.75, metalness: 0 },
+  stone: { roughness: 0.3, metalness: 0 },
+  screen: { roughness: 0.15, metalness: 0.2 },
+}
+
 const matCache = new Map<string, THREE.MeshStandardMaterial>()
-export function partMaterial(color: string, opacity = 1): THREE.MeshStandardMaterial {
-  const key = `${color}/${opacity}`
+export function partMaterial(color: string, opacity = 1, mat?: Mat): THREE.MeshStandardMaterial {
+  const key = `${color}/${opacity}/${mat ?? ''}`
   let m = matCache.get(key)
   if (!m) {
     const glass = opacity < 1
+    const props = mat ? MAT_PROPS[mat] : glass ? MAT_PROPS.glass : { roughness: 0.72, metalness: 0.04 }
     m = new THREE.MeshStandardMaterial({
-      color, roughness: glass ? 0.05 : 0.72, metalness: glass ? 0.1 : 0.04,
+      color, ...props,
       transparent: glass, opacity, depthWrite: !glass, side: glass ? THREE.DoubleSide : THREE.FrontSide,
     })
     matCache.set(key, m)
@@ -206,9 +223,21 @@ export function partMaterial(color: string, opacity = 1): THREE.MeshStandardMate
   return m
 }
 
+const geoCache = new Map<string, THREE.BufferGeometry>()
+function boxGeometry(s: [number, number, number], round = 0): THREE.BufferGeometry {
+  const r = Math.min(round, Math.min(...s) / 2 - 0.5)
+  const key = `${s.map((v) => v.toFixed(1)).join(',')}/${r > 1 ? r.toFixed(1) : 0}`
+  let g = geoCache.get(key)
+  if (!g) {
+    g = r > 1 ? new RoundedBoxGeometry(s[0], s[1], s[2], 3, r) : new THREE.BoxGeometry(...s)
+    geoCache.set(key, g)
+  }
+  return g
+}
+
 function partMesh(p: Part): THREE.Mesh {
   if (p.kind === 'box') {
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(...p.s), partMaterial(p.color, p.opacity ?? 1))
+    const mesh = new THREE.Mesh(boxGeometry(p.s, p.round), partMaterial(p.color, p.opacity ?? 1, p.mat))
     mesh.position.set(...p.c)
     if (p.rz) mesh.rotation.z = THREE.MathUtils.degToRad(p.rz)
     return mesh
@@ -218,7 +247,7 @@ function partMesh(p: Part): THREE.Mesh {
   geo.rotateX(Math.PI / 2)
   geo.translate(0, 0, p.h / 2)
   geo.scale(p.sx, p.sy, 1)
-  const mesh = new THREE.Mesh(geo, partMaterial(p.color))
+  const mesh = new THREE.Mesh(geo, partMaterial(p.color, 1, p.mat))
   mesh.position.set(...p.c)
   return mesh
 }
@@ -323,5 +352,10 @@ export function buildScene(scene: Scene): BuiltScene {
   wallGeo.computeBoundingBox()
   const box = wallGeo.boundingBox
   const bounds = box && !box.isEmpty() ? box.clone() : new THREE.Box3(new THREE.Vector3(), new THREE.Vector3(1000, 1000, 1000))
-  return { root, walls, wallEdges, furniture, floors, ceilings, doors, bounds, blockers, walkStart: walkStartPoint(scene, blockers) }
+  return { root, walls, wallEdges, furniture, floors, ceilings, doors, bounds, blockers, walkStart: walkStartPoint(scene, blockers),
+    rooms: scene.rooms.map((r) => {
+      const b = new THREE.Box2().setFromPoints(r.polygon.map(([x, y]) => new THREE.Vector2(x, y)))
+      const c = b.getCenter(new THREE.Vector2())
+      return { center: [c.x, c.y] as Point, area: r.area }
+    }) }
 }
