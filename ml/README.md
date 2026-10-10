@@ -39,3 +39,13 @@ py -3.8 -m venv .venv
 cd .. && .venv\Scripts\python eval\run_eval.py --engine ml                        # 真實圖評估,報告在 eval/reports/ml/
 ```
 `data/`、`runs/`、`.venv/` 不進 git;只有匯出的 ONNX 模型放進 `backend/models/`。
+
+## 版本比較(CubiCasa5k 40 張,同一套後段處理)
+
+| 版本 | 牆 IoU | 牆 P / R | 門窗 P / R | 採用 |
+|---|---|---|---|---|
+| v1 | 57.1% | 82.5% / 92.3% | 51.2% / 81.0% | ✓(目前的 backend/models) |
+| v2 | 52.1%(舊後段) | | | |
+| v3(加粗牆、接續 v1 微調) | 55.5% | 81.3% / 90.9% | 48.0% / 86.3% | |
+
+v3 的門窗召回率較高,但牆與門窗精確度都略低,所以維持 v1。
