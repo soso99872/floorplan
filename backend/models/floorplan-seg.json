@@ -14,10 +14,10 @@
   0.8812792309024771
  ],
  "real_eval": {
-  "wall_iou": 0.542,
-  "wall_precision": 0.77,
-  "wall_recall": 0.929,
-  "opening_precision": 0.511,
-  "opening_recall": 0.802
+  "wall_iou": 0.571,
+  "wall_precision": 0.825,
+  "wall_recall": 0.923,
+  "opening_precision": 0.512,
+  "opening_recall": 0.81
  }
 }

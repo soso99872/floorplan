@@ -49,3 +49,17 @@ cd .. && .venv\Scripts\python eval\run_eval.py --engine ml                      
 | v3(加粗牆、接續 v1 微調) | 55.5% | 81.3% / 90.9% | 48.0% / 86.3% | |
 
 v3 的門窗召回率較高,但牆與門窗精確度都略低,所以維持 v1。
+
+## 自用版:用 CubiCasa5k 微調(不公開)
+
+CubiCasa5k 是 CC BY-NC,用它訓練的模型只能非商業自用,**不進 git、不對外發布**。
+模型放在 `backend/models/local/floorplan-seg.onnx`(已列入 .gitignore),後端有這個檔就優先用它;刪掉就回到公開的 v1。
+
+```
+cd ml
+# 下載 CubiCasa5k 訓練集(4 個 parquet,約 1.75 GB)到 data/cubicasa/
+.venv\Scripts\python -m synth.cubicasa --out data/cubicasa_tiles --workers 4          # 門只標牆上的開口,和合成資料一致
+.venv\Scripts\python -m train.train --name cc1 --data data/cubicasa_tiles,data/synth --init runs/v1/best.pt --lr 3e-4 --workers 2
+.venv\Scripts\python -m train.export --run runs/cc1 --out ../backend/models/local/floorplan-seg.onnx
+```
+評估用的是 CubiCasa 的驗證集,和這裡的訓練集不重疊。

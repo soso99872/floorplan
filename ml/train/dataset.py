@@ -18,7 +18,8 @@ def to_tensor(img_bgr):
 
 class Tiles(Dataset):
     def __init__(self, root, split, size=384, augment=True, limit=None):
-        self.imgs = sorted((Path(root) / split / "img").glob("*.jpg"))
+        # root 可以用逗號串多個資料夾(例如 CubiCasa + 合成資料一起訓練)
+        self.imgs = [p for r in str(root).split(",") for p in sorted((Path(r) / split / "img").glob("*.jpg"))]
         if limit:
             self.imgs = self.imgs[:limit]
         self.size, self.augment = size, augment

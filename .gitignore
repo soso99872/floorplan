@@ -12,3 +12,5 @@ ml/.venv/
 ml/data/
 ml/runs/
 ml/*.out
+*.log
+backend/models/local/

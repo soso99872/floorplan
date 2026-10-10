@@ -7,3 +7,4 @@ pillow==10.4.0
 onnx
 onnxruntime==1.19.2
 tqdm
+pyarrow==17.0.0  # 讀 CubiCasa parquet(選配的自用微調)

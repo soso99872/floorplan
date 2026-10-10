@@ -8,7 +8,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-MODEL = Path(__file__).resolve().parent.parent / "models" / "floorplan-seg.onnx"
+_MODELS = Path(__file__).resolve().parent.parent / "models"
+# models/local/ 放只能自用的模型(例如用 CubiCasa 微調的版本,授權不允許公開),不進 git;有的話優先用
+MODEL = next((m for m in (_MODELS / "local" / "floorplan-seg.onnx", _MODELS / "floorplan-seg.onnx") if m.exists()),
+             _MODELS / "floorplan-seg.onnx")
 BG, WALL, DOOR, WINDOW = 0, 1, 2, 3
 TILE, OVERLAP = 512, 96
 MEAN = np.array([0.485, 0.456, 0.406], np.float32)
